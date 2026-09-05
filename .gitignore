@@ -1,0 +1,28 @@
+# ===== Secrets =====
+# Never commit real credentials — .env is the only place they live.
+# See .env.example for the template.
+.env
+docker-compose.override.yml
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ===== Freqtrade runtime artifacts (created at runtime, never tracked) =====
+user_data/logs/*
+user_data/backtest_results/*
+user_data/hyperopt_results/*
+user_data/data/
+*.sqlite*
+
+# Keep the directory placeholders; everything else in those dirs is runtime data.
+# (Patterns use dir/* rather than dir/ so the negations below actually work.)
+!user_data/logs/.gitkeep
+!user_data/backtest_results/.gitkeep
+
+# ===== OS / editor =====
+.DS_Store

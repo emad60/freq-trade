@@ -1,0 +1,15 @@
+# Local development overrides — OPTIONAL.
+#
+# Copy to docker-compose.override.yml to activate (it is git-ignored):
+#     cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# `docker compose` automatically merges docker-compose.override.yml on top of
+# docker-compose.yml. Keep production-safe defaults in docker-compose.yml and
+# put only machine-specific/dev conveniences here.
+#
+# Uncomment the block below to enable a debug log level override.
+
+services:
+  freqtrade:
+    # environment:
+    #   FREQTRADE__LOGGING__LEVEL: DEBUG

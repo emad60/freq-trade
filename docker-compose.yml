@@ -1,0 +1,31 @@
+# Freqtrade trading bot — core service definition.
+#
+# Security notes:
+#   * The API port is published to 127.0.0.1 ONLY — never 0.0.0.0. (Inside the
+#     container the API server itself listens on 0.0.0.0 so the published port
+#     works; isolation comes from the host-side binding plus API auth.)
+#   * restart: unless-stopped — the bot survives crashes/host reboots, but a
+#     manual `docker compose stop` keeps it stopped (unlike restart: always).
+#   * All secrets come from .env (git-ignored); see .env.example.
+#     FREQTRADE__* variables override config values natively.
+#
+# Note: user_data/config-dryrun.json is created in Phase 2. Until then
+# `docker compose up` starts the container and exits with a missing-config
+# error — that is the expected Phase 1 behavior.
+
+services:
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: freqtrade-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8080:8080" # Freqtrade REST API / FreqUI — localhost only
+    volumes:
+      - ./user_data:/freqtrade/user_data
+    command: >
+      trade
+      --config /freqtrade/user_data/config-dryrun.json
+      --db-url sqlite:////freqtrade/user_data/tradesv3.dryrun.sqlite
+      --logfile /freqtrade/user_data/logs/freqtrade.log
