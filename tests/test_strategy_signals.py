@@ -17,7 +17,9 @@ Three layers of verification:
    (timeframe, long-only, 1.5% hard cap, warmup) as executable assertions.
 
 Run on the host (``python3 -m pytest tests/ -q``): freqtrade is stubbed by
-``tests/conftest.py``. Run inside the container: the real freqtrade is used.
+``tests/conftest.py``. Run inside the container against the real freqtrade:
+``scripts/run_tests_container.sh`` (the image ships no pytest and its own
+pyproject addopts break plain runs, hence the wrapper).
 """
 
 from types import SimpleNamespace
@@ -307,6 +309,40 @@ class TestEntrySignal:
         # The regime filter holds through the dip: still above EMA200.
         assert df.loc[bounce_idx, "close"] > df.loc[bounce_idx, "ema200"]
 
+    def test_rsi_bounce_below_ema200_is_blocked_by_regime_filter(self, strategy):
+        # A sustained decline parks price far below EMA(200); a dip+bounce at
+        # the end produces a clean RSI cross UP through 30 anyway. Every such
+        # cross must stay signal-less: the EMA(200) regime filter is
+        # load-bearing, and removing it must fail this test.
+        closes = geo_chain(200.0, [(0.997, 300), (0.9975, 20), (0.988, 4), (1.025, 4)])
+        df = analyzed(strategy, closes)
+
+        assert entry_indices(df) == []
+        # Pin the setup by hand: RSI really did cross up through 30, and at
+        # every cross price was below EMA200 (the filter, not RSI, blocked it).
+        r = df["rsi"]
+        cross_up = (r > RSI_OVERSOLD) & (r.shift(1) < RSI_OVERSOLD) & r.notna() & r.shift(1).notna()
+        assert cross_up.any(), "engineered series must contain RSI cross-ups through 30"
+        for idx in df.index[cross_up]:
+            assert df.loc[idx, "close"] < df.loc[idx, "ema200"]
+        assert "enter_short" not in df.columns or df["enter_short"].isna().all()
+
+    def test_entry_fires_only_on_strict_cross_candle(self, strategy):
+        # Wiring-level check in an uptrend: touching 30.0 exactly is not a
+        # cross (strict on both sides), so of the sequence
+        # 29.0 -> 30.0 -> 29.9 -> 30.1 only the last candle may fire.
+        df = pd.DataFrame(
+            {
+                "close": [100.0, 100.0, 100.0, 100.0],
+                "ema200": [50.0, 50.0, 50.0, 50.0],
+                "rsi": [29.0, 30.0, 29.9, 30.1],
+            }
+        )
+        out = strategy.populate_entry_trend(df, {"pair": "TEST/USDT"})
+        assert out.index[out["enter_long"] == 1].tolist() == [3]
+        assert out.loc[3, "enter_tag"] == ENTRY_TAG_UPTREND_BOUNCE
+        assert "enter_short" not in out.columns
+
     def test_steady_downtrend_never_enters(self, strategy):
         # Persistent decline: RSI sits at exactly 0 (no gains to smooth) and
         # price never reclaims EMA200 — neither entry condition can fire.
@@ -357,6 +393,7 @@ class TestExitSignals:
         # Trend is still intact here — this exit is the RSI exit, nothing else.
         assert (pullback["ema50"] > pullback["ema200"]).all()
         assert entry_indices(df) == []
+        assert "exit_short" not in df.columns or df["exit_short"].isna().all()
 
     def test_trend_invalidation_exits(self, strategy):
         # Uptrend, then a sustained -0.8%/h decline long enough for EMA(50)
@@ -368,6 +405,7 @@ class TestExitSignals:
             (df["exit_long"] == 1) & (df["exit_tag"] == EXIT_TAG_TREND_INVALIDATION)
         ].tolist()
         assert trend_exits, "EMA50 must cross below EMA200 in a sustained decline"
+        assert len(trend_exits) == 1  # one death cross, and the decline keeps it crossed
         assert all(idx > 300 for idx in trend_exits)
         for idx in trend_exits:
             assert df.loc[idx, "ema50"] < df.loc[idx, "ema200"]
@@ -447,30 +485,55 @@ def call_custom_stoploss(strategy, current_rate, open_rate=100.0):
 
 
 class TestCustomStoploss:
-    def test_atr_stop_inside_cap_is_returned_as_is(self, strategy):
+    """The stop LEVEL is anchored to the entry price: stop_rate =
+    max(open_rate - 2*ATR, open_rate*(1 - 1.5%)). The returned ratio encodes
+    that level relative to the current rate; freqtrade's tighten-only
+    ratchet applies it only when it sits above the existing stop."""
+
+    def test_atr_stop_anchored_to_entry(self, strategy):
         strategy_with_dataframe(strategy, pd.DataFrame({"atr": [0.5]}))
-        # stop_rate = 100 - 2*0.5 = 99.0 -> 1% below current rate.
+        # stop_rate = max(100 - 2*0.5, 100*0.985) = 99.0 -> 1% below current.
         assert call_custom_stoploss(strategy, current_rate=100.0) == pytest.approx(-0.01)
 
-    def test_atr_stop_is_capped_at_hard_limit(self, strategy):
+    def test_wide_atr_stop_is_capped_at_level(self, strategy):
         strategy_with_dataframe(strategy, pd.DataFrame({"atr": [1.0]}))
-        # Raw distance 2% exceeds the 1.5% cap -> clamped.
+        # stop_rate = max(98.0, 98.5) = 98.5: the LEVEL is capped at 1.5%
+        # below entry, not the returned ratio.
         assert call_custom_stoploss(strategy, current_rate=100.0) == pytest.approx(-0.015)
 
-    def test_price_above_entry_keeps_cap(self, strategy):
+    def test_price_above_entry_stop_stays_entry_anchored(self, strategy):
         strategy_with_dataframe(strategy, pd.DataFrame({"atr": [0.5]}))
-        # stop_rate 99 vs current 110 -> raw -9.1%, clamped to the cap.
-        assert call_custom_stoploss(strategy, current_rate=110.0) == pytest.approx(-0.015)
+        # stop_rate 99.0 with price at 110: the ratio encodes the level 99.0
+        # (freqtrade derives 110 * (1 + r) = 99). A trailing implementation
+        # would instead return -0.015 (stop at 108.35) — that was a bug.
+        assert call_custom_stoploss(strategy, current_rate=110.0) == pytest.approx(
+            99.0 / 110.0 - 1.0
+        )
 
-    def test_gap_below_intended_stop_returns_zero(self, strategy):
-        strategy_with_dataframe(strategy, pd.DataFrame({"atr": [1.0]}))
-        # stop_rate = 98 but price already at 97: exit at market (0.0), never
-        # a positive (below-market) stop distance.
-        assert call_custom_stoploss(strategy, current_rate=97.0) == 0.0
+    def test_latest_candle_atr_is_used(self, strategy):
+        strategy_with_dataframe(strategy, pd.DataFrame({"atr": [0.5, 1.0]}))
+        # iloc[-1] (wide ATR) must drive the level: cap binds at 98.5.
+        # (A regression to iloc[0] would return -0.01 here.)
+        assert call_custom_stoploss(strategy, current_rate=100.0) == pytest.approx(-0.015)
 
-    def test_price_exactly_at_stop_returns_zero(self, strategy):
+    def test_gap_below_intended_stop_returns_none(self, strategy):
         strategy_with_dataframe(strategy, pd.DataFrame({"atr": [1.0]}))
-        assert call_custom_stoploss(strategy, current_rate=98.0) == 0.0
+        # stop_rate 98.5 but price already at 97: freqtrade 2026.8 ignores a
+        # falsy 0.0 return, and the existing stop (at worst the static 1.5%
+        # floor) governs the exit — so None, never 0.0.
+        assert call_custom_stoploss(strategy, current_rate=97.0) is None
+
+    def test_price_exactly_at_stop_returns_none(self, strategy):
+        strategy_with_dataframe(strategy, pd.DataFrame({"atr": [1.0]}))
+        assert call_custom_stoploss(strategy, current_rate=98.5) is None
+
+    def test_price_just_above_stop_returns_tight_ratio(self, strategy):
+        strategy_with_dataframe(strategy, pd.DataFrame({"atr": [1.0]}))
+        # A hair above the intended level: the ratio places the stop exactly
+        # there (≈ -0.1%), not at the current rate and not at the cap.
+        assert call_custom_stoploss(strategy, current_rate=98.6) == pytest.approx(
+            98.5 / 98.6 - 1.0
+        )
 
     @pytest.mark.parametrize("atr_value", [np.nan, 0.0, -1.0])
     def test_unusable_atr_returns_none_keeps_static_floor(self, strategy, atr_value):

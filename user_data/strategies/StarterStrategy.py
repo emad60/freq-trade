@@ -205,19 +205,24 @@ class StarterStrategy(IStrategy):
         after_fill: bool = True,
         **kwargs,
     ) -> float | None:
-        """ATR-sized stop: 2x ATR(14) below the entry price, clamped.
+        """ATR-sized stop: 2x ATR(14) below the ENTRY price, hard-capped.
 
-        Returns the stop distance as a negative ratio relative to the current
-        rate (freqtrade's custom-stoploss contract). Clamps:
+        The stop LEVEL is anchored to the entry price, never to the running
+        rate: ``stop_rate = max(open_rate - 2*ATR, open_rate*(1 - 1.5%))`` —
+        the ATR stop, never looser than 1.5% below entry. The return value is
+        that level expressed as a ratio of the current rate (freqtrade's
+        custom-stoploss contract), so the level freqtrade derives from the
+        ratio is the intended one regardless of how far price has traveled.
+        Its tighten-only ratchet then applies it only if it sits above the
+        existing stop — the stop follows the entry-anchored level as ATR
+        changes and never trails the price by the cap.
 
-        * never wider than the hard 1.5% cap (``HARD_STOP_CAP``) — high
-          volatility widens the raw ATR distance, the cap keeps it honest;
-        * never positive — if price has already gapped below the intended
-          stop, 0.0 means "stop at the current rate" (exit now).
-
-        Returns None (keep the current stop, which is at worst the static
-        1.5% cap) when the analyzed dataframe is unavailable or ATR is not a
-        usable positive number (warmup / bad data).
+        Returns None (keep the current stop) when: the analyzed dataframe is
+        unavailable, ATR is not a usable positive number (warmup / bad data),
+        the current rate is unusable, or price has already fallen to the
+        intended stop level — freqtrade 2026.8 ignores a falsy 0.0 return,
+        and with price at/below the intended level the existing stop (at
+        worst the static 1.5% floor) exits the trade on its own.
         """
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self)
         if dataframe is None or dataframe.empty:
@@ -225,6 +230,12 @@ class StarterStrategy(IStrategy):
         atr_value = dataframe.iloc[-1]["atr"]
         if pd.isna(atr_value) or atr_value <= 0:
             return None
-        stop_rate = trade.open_rate - ATR_STOP_MULT * atr_value
-        distance = (stop_rate / current_rate) - 1.0
-        return min(0.0, max(distance, -HARD_STOP_CAP))
+        if not current_rate or not np.isfinite(current_rate) or current_rate <= 0:
+            return None
+        stop_rate = max(
+            trade.open_rate - ATR_STOP_MULT * atr_value,
+            trade.open_rate * (1.0 - HARD_STOP_CAP),
+        )
+        if stop_rate >= current_rate:
+            return None
+        return stop_rate / current_rate - 1.0
