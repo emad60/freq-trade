@@ -19,7 +19,7 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 2 — config skeleton & dry-run gate
+## Status: Phase 3 — starter strategy
 
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
@@ -31,17 +31,33 @@ config `fee` is a **ratio**, not a percent).
 |---|---|---|
 | 1 | Scaffolding & environment (Docker, .env, git) | ✅ done |
 | 2 | Exchange selection & config skeleton + dry-run safety gate | ✅ done |
-| 3 | Starter strategy — deterministic, no ML | ⬜ next |
-| 4 | Hardcoded risk management layer (`risk_guard.py`) | ⬜ |
+| 3 | Starter strategy — deterministic, no ML | ✅ done |
+| 4 | Hardcoded risk management layer (`risk_guard.py`) | ⬜ next |
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ⬜ |
 | 6 | Dry-run (paper trading) setup — min 2–4 weeks | ⬜ |
 | 7 | Telegram monitoring & kill-switch | ⬜ |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
 
-> **Note:** until Phase 3 lands `user_data/strategies/StarterStrategy.py`, the
-> container will load the config successfully and then exit with a
-> missing-strategy error. That is expected at this stage.
+## StarterStrategy (Phase 3)
+
+`user_data/strategies/StarterStrategy.py` — deterministic, long-only, 1h
+timeframe, zero ML:
+
+- **Entry:** close above EMA(200) **and** RSI(14) crossing *up* through 30
+  (oversold bounce in an uptrend) → tag `rsi_bounce_uptrend`.
+- **Exits:** RSI(14) crossing *down* through 70 (`rsi_overbought`), EMA(50)
+  crossing below EMA(200) (`trend_invalidation`), +5% ROI take-profit, or the
+  stop-loss.
+- **Stop:** ATR(14)-sized at 2×ATR below entry via `custom_stoploss`,
+  hard-capped at **1.5%** per trade (`stoploss = -0.015` is the static floor;
+  Phase 4's `risk_guard.py` re-enforces the cap *outside* the strategy).
+
+Indicators are plain pandas (Wilder-smoothed RSI/ATR, standard EMA) so the
+tests run without TA-Lib; `tests/test_strategy_signals.py` verifies them
+against independent loop-based reference implementations and engineered
+candle series with hand-computed RSI levels. The suite passes on the host
+(freqtrade stubbed) **and** inside the container (real freqtrade).
 
 **Safety gate:** `scripts/validate_config.py` refuses any config with
 `dry_run: false` unless `LIVE_TRADING_CONFIRMED=yes` (exact, case-sensitive)
@@ -74,12 +90,13 @@ user_data/            Freqtrade working dir (mounted into the container)
   config-dryrun.json  THE config — dry_run hardcoded true. Single source of
                       truth: no separate config.json exists by design, and
                       config-live.json only appears in Phase 9 behind the gate
-  strategies/         Strategy classes (Phase 3)
+  strategies/         StarterStrategy.py — EMA(50)/EMA(200) trend filter,
+                      RSI(14) entry/exit timing, ATR(14) stop sizing
   notebooks/          Analysis notebooks
   logs/               Runtime logs (git-ignored)
   backtest_results/   Backtest reports (git-ignored)
-tests/                pytest suite — config validation now; strategy signals
-                      (Phase 3) and risk limits (Phase 4) as those phases land
+tests/                pytest suite — config validation (Phase 2), strategy
+                      signals & stop sizing (Phase 3); risk limits in Phase 4
 scripts/              validate_config.py now; risk_guard.py (Phase 4) and
                       run_backtest.sh / run_dryrun.sh (Phases 5–6) as landed
 docs/                 SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md (as phases land)

@@ -31,6 +31,7 @@ services:
     volumes:
       - ./user_data:/freqtrade/user_data
       - ./scripts:/freqtrade/scripts:ro
+      - ./tests:/freqtrade/tests:ro
     # sh -c wrapper so the safety gate runs before the bot on EVERY start;
     # `exec` hands the PID to freqtrade so docker stop signals reach it.
     entrypoint: ["/bin/sh", "-c"]
