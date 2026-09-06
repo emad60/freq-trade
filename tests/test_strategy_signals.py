@@ -469,7 +469,18 @@ class TestEdgeCaseMarkets:
 # --------------------------------------------------------------------------
 
 def strategy_with_dataframe(strategy, dataframe):
-    strategy.dp = SimpleNamespace(get_analyzed_dataframe=lambda pair, strat: (dataframe, None))
+    """Stub DataProvider mimicking freqtrade 2026.8's REAL signature
+    ``get_analyzed_dataframe(pair, timeframe)``: an empty frame on a
+    timeframe mismatch, exactly like the real cache. A strategy calling it
+    with the wrong second argument (e.g. the strategy object) can never see
+    the data — regression guard for the bug that made custom_stoploss a
+    silent runtime no-op while the tests stayed green."""
+    def get_analyzed_dataframe(pair, timeframe):
+        if timeframe != strategy.timeframe:
+            return (pd.DataFrame(), None)
+        return (dataframe, None)
+
+    strategy.dp = SimpleNamespace(get_analyzed_dataframe=get_analyzed_dataframe)
     return strategy
 
 
@@ -541,8 +552,25 @@ class TestCustomStoploss:
         assert call_custom_stoploss(strategy, current_rate=100.0) is None
 
     def test_missing_dataframe_returns_none(self, strategy):
-        strategy.dp = SimpleNamespace(get_analyzed_dataframe=lambda pair, strat: (None, None))
+        strategy.dp = SimpleNamespace(
+            get_analyzed_dataframe=lambda pair, timeframe: (None, None)
+        )
         assert call_custom_stoploss(strategy, current_rate=100.0) is None
+
+    def test_data_provider_is_called_with_the_strategy_timeframe(self, strategy):
+        """Regression for the silent-no-op bug: freqtrade 2026.8's
+        DataProvider.get_analyzed_dataframe takes (pair, timeframe); passing
+        anything else (e.g. the strategy object) returns an empty frame and
+        disables custom_stoploss everywhere while looking harmless."""
+        calls = []
+
+        def spy(pair, timeframe):
+            calls.append((pair, timeframe))
+            return (pd.DataFrame({"atr": [0.5]}), None)
+
+        strategy.dp = SimpleNamespace(get_analyzed_dataframe=spy)
+        assert call_custom_stoploss(strategy, current_rate=100.0) == pytest.approx(-0.01)
+        assert calls == [("TEST/USDT", "1h")]
 
     def test_empty_dataframe_returns_none(self, strategy):
         strategy_with_dataframe(strategy, pd.DataFrame({"atr": pd.Series([], dtype=float)}))

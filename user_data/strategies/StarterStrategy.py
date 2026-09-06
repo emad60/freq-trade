@@ -224,7 +224,7 @@ class StarterStrategy(IStrategy):
         and with price at/below the intended level the existing stop (at
         worst the static 1.5% floor) exits the trade on its own.
         """
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self)
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if dataframe is None or dataframe.empty:
             return None
         atr_value = dataframe.iloc[-1]["atr"]

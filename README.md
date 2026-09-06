@@ -57,7 +57,15 @@ Indicators are plain pandas (Wilder-smoothed RSI/ATR, standard EMA) so the
 tests run without TA-Lib; `tests/test_strategy_signals.py` verifies them
 against independent loop-based reference implementations and engineered
 candle series with hand-computed RSI levels. The suite passes on the host
-(freqtrade stubbed) **and** inside the container (real freqtrade).
+(freqtrade stubbed) **and** inside the container (real freqtrade):
+
+```bash
+python3 -m pytest tests/ -q          # host (freqtrade stubbed)
+scripts/run_tests_container.sh       # container (real freqtrade 2026.8;
+                                     # image ships no pytest — the wrapper
+                                     # installs it ephemerally and clears the
+                                     # image's pytest-xdist addopts)
+```
 
 **Safety gate:** `scripts/validate_config.py` refuses any config with
 `dry_run: false` unless `LIVE_TRADING_CONFIRMED=yes` (exact, case-sensitive)
