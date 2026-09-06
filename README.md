@@ -19,13 +19,18 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 1 — scaffolding
+## Status: Phase 2 — config skeleton & dry-run gate
+
+Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
+(dry-run balance deliberately mirrors the real Binance balance for honest sizing
+behavior; Binance spot min notional is ~$5, so `max_open_trades: 2` at
+`stake_amount: 8 USDT`).
 
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Scaffolding & environment (Docker, .env, git) | ✅ done |
-| 2 | Exchange selection & config skeleton | ⏳ awaiting decisions (exchange / quote currency / pairs / paper balance) |
-| 3 | Starter strategy — deterministic, no ML | ⬜ |
+| 2 | Exchange selection & config skeleton + dry-run safety gate | ✅ done |
+| 3 | Starter strategy — deterministic, no ML | ⬜ next |
 | 4 | Hardcoded risk management layer (`risk_guard.py`) | ⬜ |
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ⬜ |
 | 6 | Dry-run (paper trading) setup — min 2–4 weeks | ⬜ |
@@ -33,10 +38,13 @@ Compose. Spot trading only — no margin, no futures, no leverage.
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
 
-> **Note:** until Phase 2 lands `user_data/config-dryrun.json`, the container
-> will start and then exit with a missing-config error. That is expected at
-> this stage — the Phase 1 acceptance test is that the image pulls and the
-> container boots, not that trading runs.
+> **Note:** until Phase 3 lands `user_data/strategies/StarterStrategy.py`, the
+> container will load the config successfully and then exit with a
+> missing-strategy error. That is expected at this stage.
+
+**Safety gate:** `scripts/validate_config.py` refuses any config with
+`dry_run: false` unless `LIVE_TRADING_CONFIRMED=yes` (exact, case-sensitive)
+is set in the environment. It must never be weakened or removed.
 
 ## Quickstart
 
