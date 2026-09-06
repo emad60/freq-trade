@@ -7,11 +7,17 @@
 #   * restart: unless-stopped — the bot survives crashes/host reboots, but a
 #     manual `docker compose stop` keeps it stopped (unlike restart: always).
 #   * All secrets come from .env (git-ignored); see .env.example.
-#     FREQTRADE__* variables override config values natively.
+#     FREQTRADE__* variables override config values natively. NEVER set
+#     FREQTRADE__DRY_RUN there — it would bypass the file-based safety gate.
 #
-# Note: user_data/config-dryrun.json is created in Phase 2. Until then
-# `docker compose up` starts the container and exits with a missing-config
-# error — that is the expected Phase 1 behavior.
+# Safety gate: every start runs scripts/validate_config.py BEFORE the bot
+# (mounted read-only below). The bot never launches if the gate refuses.
+# freqtrade 2026.8 exits 0 even on config errors, so this pre-gate is what
+# actually enforces dry-run on the start path.
+#
+# Ad-hoc one-off commands need an entrypoint override, e.g.:
+#   docker compose run --rm --entrypoint freqtrade freqtrade show-config \
+#     --config /freqtrade/user_data/config-dryrun.json
 
 services:
   freqtrade:
@@ -24,8 +30,9 @@ services:
       - "127.0.0.1:8080:8080" # Freqtrade REST API / FreqUI — localhost only
     volumes:
       - ./user_data:/freqtrade/user_data
-    command: >
-      trade
-      --config /freqtrade/user_data/config-dryrun.json
-      --db-url sqlite:////freqtrade/user_data/tradesv3.dryrun.sqlite
-      --logfile /freqtrade/user_data/logs/freqtrade.log
+      - ./scripts:/freqtrade/scripts:ro
+    # sh -c wrapper so the safety gate runs before the bot on EVERY start;
+    # `exec` hands the PID to freqtrade so docker stop signals reach it.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - python3 /freqtrade/scripts/validate_config.py /freqtrade/user_data/config-dryrun.json && exec freqtrade trade --config /freqtrade/user_data/config-dryrun.json --db-url sqlite:////freqtrade/user_data/tradesv3.dryrun.sqlite --logfile /freqtrade/user_data/logs/freqtrade.log

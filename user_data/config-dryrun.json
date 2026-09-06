@@ -8,7 +8,7 @@
     "stake_amount": 8.0,
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
-    "fee": 0.1,
+    "fee": 0.001,
     "strategy": "StarterStrategy",
     "unfilledtimeout": {
         "entry": 10,

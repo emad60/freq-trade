@@ -24,7 +24,8 @@ Compose. Spot trading only — no margin, no futures, no leverage.
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
 behavior; Binance spot min notional is ~$5, so `max_open_trades: 2` at
-`stake_amount: 8 USDT`).
+`stake_amount: 8 USDT`; fees pinned at ratio `0.001` = 0.1% — freqtrade's
+config `fee` is a **ratio**, not a percent).
 
 | Phase | Description | Status |
 |---|---|---|
@@ -44,7 +45,14 @@ behavior; Binance spot min notional is ~$5, so `max_open_trades: 2` at
 
 **Safety gate:** `scripts/validate_config.py` refuses any config with
 `dry_run: false` unless `LIVE_TRADING_CONFIRMED=yes` (exact, case-sensitive)
-is set in the environment. It must never be weakened or removed.
+is set in the environment. It must never be weakened or removed. It is
+enforced **on the start path**: `docker compose up` runs the validator before
+`freqtrade trade` (compose mounts `scripts/` read-only and wraps the command),
+so a config flipped to live mode cannot start the bot without the env var.
+This matters because freqtrade 2026.8 exits with code 0 even when config
+validation fails — it cannot gate anything by itself. Never set
+`FREQTRADE__DRY_RUN` in `.env`: it would override the config's dry_run flag
+at runtime, bypassing the file-based gate.
 
 ## Quickstart
 
@@ -63,14 +71,17 @@ manual stop stays stopped.
 
 ```
 user_data/            Freqtrade working dir (mounted into the container)
-  config.json         Main config (Phase 2)
-  config-dryrun.json  Dry-run config — dry_run hardcoded true (Phase 2)
+  config-dryrun.json  THE config — dry_run hardcoded true. Single source of
+                      truth: no separate config.json exists by design, and
+                      config-live.json only appears in Phase 9 behind the gate
   strategies/         Strategy classes (Phase 3)
   notebooks/          Analysis notebooks
   logs/               Runtime logs (git-ignored)
   backtest_results/   Backtest reports (git-ignored)
-tests/                pytest suite: risk limits, strategy signals, config validation
-scripts/              run_backtest.sh, run_dryrun.sh, validate_config.py, risk_guard.py
+tests/                pytest suite — config validation now; strategy signals
+                      (Phase 3) and risk limits (Phase 4) as those phases land
+scripts/              validate_config.py now; risk_guard.py (Phase 4) and
+                      run_backtest.sh / run_dryrun.sh (Phases 5–6) as landed
 docs/                 SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md (as phases land)
 ```
 

@@ -123,3 +123,64 @@ def test_empty_pair_whitelist_is_refused(tmp_path):
     proc = run_validator(tmp_path, config)
     assert proc.returncode == 1
     assert "pair_whitelist" in proc.stderr
+
+
+# --- fee is a RATIO in freqtrade (0.001 = 0.1%); percent-scale = 10x mistake --
+
+
+def test_fee_percent_scale_is_refused(tmp_path):
+    # 0.1 as a ratio means a 10% fee — the exact mistake caught in Phase 2.
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "fee": 0.1})
+    assert proc.returncode == 1
+    assert "fee" in proc.stderr
+
+
+def test_fee_ratio_passes(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "fee": 0.001})
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_fee_negative_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "fee": -0.001})
+    assert proc.returncode == 1
+
+
+def test_fee_string_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "fee": "0.001"})
+    assert proc.returncode == 1
+
+
+# --- api_server secrets must meet freqtrade's minLength 32 --------------------
+
+
+def test_api_server_short_jwt_is_refused(tmp_path):
+    config = {**DRYRUN_CONFIG, "api_server": {
+        "enabled": True, "jwt_secret_key": "short", "ws_token": "x" * 40}}
+    proc = run_validator(tmp_path, config)
+    assert proc.returncode == 1
+    assert "jwt_secret_key" in proc.stderr
+
+
+def test_api_server_long_secrets_pass(tmp_path):
+    config = {**DRYRUN_CONFIG, "api_server": {
+        "enabled": True, "jwt_secret_key": "s" * 40, "ws_token": "t" * 40}}
+    proc = run_validator(tmp_path, config)
+    assert proc.returncode == 0, proc.stderr
+
+
+# --- unreadable files route to the exit-2 class, not a traceback --------------
+
+
+def test_unreadable_file_exits_2(tmp_path):
+    unreadable = tmp_path / "secret.json"
+    unreadable.write_text("{}", encoding="utf-8")
+    unreadable.chmod(0o000)
+    env = os.environ.copy()
+    env.pop("LIVE_TRADING_CONFIRMED", None)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(unreadable)],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 2
+    assert "ERROR" in proc.stderr
+    assert "Traceback" not in proc.stderr
