@@ -25,6 +25,20 @@ Operational knobs (NOT risk limits — the limits live only in risk_guard.py):
   WATCHDOG_CONFIG           default /freqtrade/user_data/config-dryrun.json
   WATCHDOG_API_URL          default http://freqtrade:8080 (compose network)
   WATCHDOG_INTERVAL_SECONDS default 300
+  WATCHDOG_TELEGRAM_API     default https://api.telegram.org (Bot API base;
+                            override only for tests)
+  WATCHDOG_NOTIFY_COOLDOWN_SECONDS default 3600 (min 60 — per-kind cooldown
+                            so a persistent condition sends one notification
+                            per window, not one per 5-min cycle)
+
+Telegram notifications (Phase 7): when FREQTRADE__TELEGRAM__ENABLED is
+truthy (same switch that turns on freqtrade's own Telegram RPC), the
+watchdog sends the operator a message on breach (with the stop result),
+on audit failure, when the bot API is unreachable, and when a breach
+cannot be acted on because API credentials are missing. Token/chat_id
+come from FREQTRADE__TELEGRAM__TOKEN / CHAT_ID (.env). With Telegram not
+enabled the notify path is silent and inert. The token is never logged.
+Self-test the delivery path with: python3 scripts/watchdog.py --notify-test
 
 A breach POSTs /api/v1/stop (bot stops entering AND managing trades) and
 keeps running so continued breaches stay visible in `docker compose logs
@@ -80,6 +94,112 @@ def _interval_from_env() -> int:
 INTERVAL_SECONDS = _interval_from_env()
 
 
+def _cooldown_from_env() -> int:
+    """Parse WATCHDOG_NOTIFY_COOLDOWN_SECONDS like _interval_from_env: a bad
+    value must fail with a clear message, not crash-loop the container."""
+    raw = os.environ.get("WATCHDOG_NOTIFY_COOLDOWN_SECONDS", "3600")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"watchdog: WATCHDOG_NOTIFY_COOLDOWN_SECONDS must be an integer, "
+            f"got {raw!r}"
+        ) from None
+    if value < 60:
+        raise SystemExit(
+            f"watchdog: WATCHDOG_NOTIFY_COOLDOWN_SECONDS must be >= 60 (a "
+            f"notification per 5-min audit cycle would be spam), got {value}"
+        )
+    return value
+
+
+NOTIFY_COOLDOWN_SECONDS = _cooldown_from_env()
+
+TELEGRAM_API_BASE = os.environ.get("WATCHDOG_TELEGRAM_API", "https://api.telegram.org")
+
+_TRUTHY = ("1", "true", "yes")
+
+
+def telegram_enabled() -> bool:
+    """True when the operator has switched Telegram on. Deliberately the SAME
+    FREQTRADE__TELEGRAM__ENABLED switch that turns on freqtrade's own RPC:
+    one setup step lights both surfaces, and off means fully off."""
+    return os.environ.get("FREQTRADE__TELEGRAM__ENABLED", "").strip().lower() in _TRUTHY
+
+
+def send_telegram(api_base: str, token: str, chat_id: str, text: str,
+                  timeout: float = 10.0) -> tuple[bool, str]:
+    """POST {api_base}/bot{token}/sendMessage (Telegram Bot API). Returns
+    (ok, detail). Never raises; on any failure detail explains why with the
+    token scrubbed — the token must never reach the logs."""
+    url = f"{api_base.rstrip('/')}/bot{token}/sendMessage"
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+    request = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return 200 <= resp.status < 300, resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        return False, f"HTTP {e.code}: {detail.replace(token, '<token>')}"
+    except Exception as e:
+        # Broad by design: URLError/OSError plus http.client raises that are
+        # NEITHER (BadStatusLine, LineTooLong, IncompleteRead) — this function
+        # guarantees (ok, detail), and a raised exception here would kill the
+        # restart-on-failure watchdog loop (silent enforcement loss).
+        return False, f"{type(e).__name__}: {str(e).replace(token, '<token>')}"
+
+
+def notify_event(state: dict, kind: str, text: str,
+                 now_monotonic: float) -> bool:
+    """Send one watchdog notification, respecting a per-kind cooldown.
+
+    `state` maps kind -> time of last SUCCESSFUL send; main() owns one dict
+    for the process lifetime (make_notifier binds it). Cooldown semantics:
+
+    * disabled (FREQTRADE__TELEGRAM__ENABLED not truthy): silent no-op —
+      the operator has not set Telegram up, and a reminder every audit
+      cycle would be log noise, not signal.
+    * sent recently: suppressed (returns False, nothing sent).
+    * send fails: state NOT updated, so the next cycle retries — a failure
+      is log noise only, nothing was delivered.
+    * missing token/chat_id while enabled: a misconfiguration, not a
+      transient failure — marked in state so the warning is logged once
+      per cooldown instead of every cycle.
+    """
+    if not telegram_enabled():
+        return False
+    last = state.get(kind)
+    if last is not None and (now_monotonic - last) < NOTIFY_COOLDOWN_SECONDS:
+        return False
+    token = os.environ.get("FREQTRADE__TELEGRAM__TOKEN", "").strip()
+    chat_id = os.environ.get("FREQTRADE__TELEGRAM__CHAT_ID", "").strip()
+    if not token or not chat_id:
+        state[kind] = now_monotonic
+        _log(f"WARNING: telegram enabled but token/chat_id missing — "
+             f"cannot send {kind} notification")
+        return False
+    ok, detail = send_telegram(TELEGRAM_API_BASE, token, chat_id, text)
+    if ok:
+        state[kind] = now_monotonic
+        _log(f"telegram: sent {kind} notification")
+    else:
+        _log(f"WARNING: telegram {kind} notification FAILED: {detail}")
+    return ok
+
+
+def make_notifier(state: dict | None = None):
+    """Bind a persistent cooldown state into a notify(kind, text) callable —
+    the injection point run_once uses and tests replace."""
+    state = {} if state is None else state
+
+    def notify(kind: str, text: str) -> bool:
+        return notify_event(state, kind, text, time.monotonic())
+
+    return notify
+
+
 def _log(message: str) -> None:
     print(f"{datetime.now(timezone.utc).isoformat()} watchdog: {message}", flush=True)
 
@@ -124,7 +244,10 @@ def stop_bot(api_url: str, username: str, password: str,
             return 200 <= resp.status < 300, resp.read().decode(errors="replace")
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code}: {e.read().decode(errors='replace')}"
-    except (urllib.error.URLError, OSError) as e:
+    except Exception as e:
+        # Broad by design: see send_telegram — http.client raises non-OSError
+        # exceptions too, and a crash here would strike mid-stop, exactly when
+        # enforcement matters most.
         return False, f"{type(e).__name__}: {e}"
 
 
@@ -137,14 +260,32 @@ def ping_bot(api_url: str, timeout: float = 5.0) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             return 200 <= resp.status < 300
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+    except Exception:  # broad by design — see send_telegram
         return False
 
 
+def _notify_text(now: datetime, body: str) -> str:
+    return f"[freqtrade watchdog] {now.strftime('%Y-%m-%d %H:%M:%S')} UTC — {body}"
+
+
 def run_once(now: datetime, *, db_path: str = DB_PATH, config_path: str = CONFIG_PATH,
-             api_url: str = API_URL, stop_fn=stop_bot, ping_fn=ping_bot) -> str:
+             api_url: str = API_URL, stop_fn=stop_bot, ping_fn=ping_bot,
+             notify=None, ping_grace_seconds: float = 15.0,
+             sleep_fn=time.sleep) -> str:
     """One watchdog cycle. Returns 'stopped' (breach), 'ok', or 'idle'
-    (nothing to audit). Breach -> stop_fn is called and its result logged."""
+    (nothing to audit). Breach -> stop_fn is called and its result logged.
+
+    notify(kind, text) is the Telegram notifier — make_notifier() by default
+    (a fresh cooldown state per call, which is correct for --once; main()
+    binds one persistent state across cycles). Injected by tests. Kinds:
+    'breach', 'no_credentials', 'error', 'unreachable'.
+
+    ping_grace_seconds: on a failed liveness ping, wait this long and retry
+    once before declaring the bot unreachable. Covers the stack-restart race
+    (the watchdog boots in ~1s, freqtrade needs ~15s to open its API) so a
+    routine recreate does not fire a false 'unreachable' notification."""
+    if notify is None:
+        notify = make_notifier()
     try:
         report = audit(db_path, config_path, now)
     except (sqlite3.Error, KeyError, ValueError, OSError) as e:
@@ -156,14 +297,25 @@ def run_once(now: datetime, *, db_path: str = DB_PATH, config_path: str = CONFIG
         # ValueError), otherwise loop mode dies and restart-on-failure turns
         # a typo into permanent, silent loss of runtime enforcement.
         _log(f"ERROR: audit failed ({type(e).__name__}: {e}) — trading NOT stopped")
+        notify("error", _notify_text(
+            now, f"audit FAILED ({type(e).__name__}: {e}) — trading NOT "
+            "stopped; the watchdog retries next cycle"))
         return "error"
     if report is None:
         return "idle"
 
-    if not ping_fn(api_url):
+    reachable = ping_fn(api_url)
+    if not reachable and ping_grace_seconds > 0:
+        sleep_fn(ping_grace_seconds)
+        reachable = ping_fn(api_url)
+    if not reachable:
         _log("WARNING: bot API unreachable — the watchdog cannot stop a bot "
              "it cannot reach; if this persists, the bot is likely DOWN, "
              "not idle")
+        notify("unreachable", _notify_text(
+            now, "bot API UNREACHABLE (/ping failed) — the watchdog cannot "
+            "stop a bot it cannot reach; if this persists the bot is likely "
+            "DOWN, not idle"))
 
     _log(f"account: open {report['open_trades']} "
          f"(exposure {report['open_exposure']:.2f}/{report['max_open_exposure']:.2f}), "
@@ -182,6 +334,10 @@ def run_once(now: datetime, *, db_path: str = DB_PATH, config_path: str = CONFIG
     password = os.environ.get("FREQTRADE__API_SERVER__PASSWORD", "")
     if not username or not password:
         _log("ERROR: API credentials not found in environment — CANNOT stop the bot")
+        notify("no_credentials", _notify_text(
+            now, "RISK BREACH but API credentials are missing from the "
+            "environment — CANNOT stop the bot! Breaches: "
+            + "; ".join(report["breaches"])))
         return "stopped-no-credentials"
     ok, detail = stop_fn(api_url, username, password)
     if ok:
@@ -189,17 +345,38 @@ def run_once(now: datetime, *, db_path: str = DB_PATH, config_path: str = CONFIG
              "breaches persist). Review, then restart manually if appropriate.")
     else:
         _log(f"ERROR: stop request FAILED: {detail}")
+    notify("breach", _notify_text(
+        now, f"RISK BREACH — stop request {'issued' if ok else 'FAILED'} "
+        f"({detail[:200]}). Breaches: " + "; ".join(report["breaches"])))
     return "stopped"
 
 
 def main(argv: list[str] | None = None) -> int:
-    if "--once" in (argv if argv is not None else sys.argv[1:]):
+    args = argv if argv is not None else sys.argv[1:]
+    if "--notify-test" in args:
+        # Operator self-test: prove the watchdog -> Telegram delivery path
+        # on demand (fresh cooldown state; exit 1 with a readable reason
+        # when Telegram is not enabled or the send fails).
+        if not telegram_enabled():
+            print("watchdog: telegram notifications are disabled — set "
+                  "FREQTRADE__TELEGRAM__ENABLED=true (plus token/chat_id) in "
+                  ".env and recreate: docker compose up -d --force-recreate "
+                  "watchdog", file=sys.stderr)
+            return 1
+        sent = notify_event({}, "test", _notify_text(
+            datetime.now(timezone.utc),
+            "test notification — if you can read this, the watchdog -> "
+            "Telegram path works"), time.monotonic())
+        return 0 if sent else 1
+    if "--once" in args:
         status = run_once(datetime.now(timezone.utc))
         return 0 if status in ("ok", "idle") else 1
+    notify = make_notifier()  # one cooldown state for the process lifetime
     _log(f"starting (db={DB_PATH}, config={CONFIG_PATH}, api={API_URL}, "
-         f"interval={INTERVAL_SECONDS}s)")
+         f"interval={INTERVAL_SECONDS}s, "
+         f"telegram={'on' if telegram_enabled() else 'off'})")
     while True:
-        run_once(datetime.now(timezone.utc))
+        run_once(datetime.now(timezone.utc), notify=notify)
         time.sleep(INTERVAL_SECONDS)
 
 

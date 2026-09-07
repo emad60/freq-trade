@@ -44,6 +44,10 @@ Checks performed on the environment (once per run):
     inside the container with .env already loaded, so the check sees exactly
     what freqtrade will; without it a one-line .env edit would silently
     bypass every file-based check above
+  * FREQTRADE__TELEGRAM__ENABLED=true with a missing, placeholder, or
+    malformed token/chat_id is refused — freqtrade aborts on a bad Telegram
+    token, and since it exits 0 on config errors this container would
+    restart-loop forever with restart: unless-stopped (Phase 7)
 
 Exit codes:
     0  all configs passed
@@ -60,6 +64,7 @@ import importlib
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -103,6 +108,24 @@ PROTECTED_ENV_KEYS = (
     "tradable_balance_ratio",
     "dry_run_wallet",
 )
+
+# Telegram (Phase 7): the .env.example placeholders, duplicated here because
+# the container only mounts user_data/ and scripts/ — it cannot read
+# .env.example at gate time. These are NOT secrets (committed in the example
+# template); the check exists so "enabled" with an unfilled template refuses
+# at the gate instead of freqtrade aborting at startup and the container
+# restart-looping (it exits 0 on config errors, so nothing else would catch
+# it). If the placeholder ever changes in .env.example, change it here too —
+# test_config_validation.py pins both against the real .env.example.
+TELEGRAM_PLACEHOLDER_TOKEN = "0000000000:AAExample_Token_Placeholder_Not_Real_000"
+TELEGRAM_PLACEHOLDER_CHAT_ID = "000000000"
+# Bot tokens are "<bot-id>:<hash>" (~35-char hash part); chat ids are a
+# (possibly negative) number or an @channelname. re.ASCII is required:
+# without it \d matches Arabic-Indic digits and \w matches Cyrillic
+# letters, so a unicode-shaped fake passes the gate and the bot still
+# aborts at startup — the restart-loop this check exists to prevent.
+TELEGRAM_TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$", re.ASCII)
+TELEGRAM_CHAT_ID_RE = re.compile(r"^-?\d+$|^@\w{3,}$", re.ASCII)
 
 
 class ConfigFileError(ValueError):
@@ -202,6 +225,21 @@ def check_structure(config: dict) -> list[str]:
                     f"'api_server.{key}' must be a string of at least "
                     f"{API_SECRET_MIN_LENGTH} characters (freqtrade schema minimum)"
                 )
+
+    # Credentials never live in tracked config files — they are injected via
+    # FREQTRADE__TELEGRAM__* from .env, which overrides this block at runtime.
+    # (Caught live on day one: a real token pasted into the config was one
+    # `git add` away from git history.)
+    telegram = config.get("telegram")
+    if isinstance(telegram, dict):
+        token = telegram.get("token")
+        if isinstance(token, str) and token.strip():
+            problems.append(
+                "'telegram.token' must stay empty in the config file — the "
+                "token is a secret and comes from FREQTRADE__TELEGRAM__TOKEN "
+                "in .env (env overrides win at runtime); a token in this "
+                "git-tracked file violates the no-secrets-in-git rule"
+            )
     return problems
 
 
@@ -225,6 +263,57 @@ def check_env_overrides(env: dict[str, str]) -> list[str]:
                 f"dry-run gate or risk-limit keys; remove it from .env / "
                 f"the environment (limits change only via code commits)"
             )
+    return problems
+
+
+def check_telegram_env(env: dict[str, str]) -> list[str]:
+    """Refuse a half-configured Telegram setup (Phase 7). Returns problems.
+
+    FREQTRADE__TELEGRAM__ENABLED=true makes freqtrade start its Telegram RPC;
+    a placeholder or malformed token aborts the bot at startup — and since
+    freqtrade exits 0 on config errors, the container would restart-loop
+    forever. Failing here, at the gate, turns a silent crash-loop into a
+    readable refusal. Leaving Telegram disabled with placeholders (the
+    default) passes untouched.
+    """
+    problems: list[str] = []
+    enabled = env.get("FREQTRADE__TELEGRAM__ENABLED", "").strip().lower()
+    if enabled not in ("1", "true", "yes"):
+        return problems
+    token = env.get("FREQTRADE__TELEGRAM__TOKEN", "").strip()
+    chat_id = env.get("FREQTRADE__TELEGRAM__CHAT_ID", "").strip()
+    if (token == TELEGRAM_PLACEHOLDER_TOKEN
+            or chat_id == TELEGRAM_PLACEHOLDER_CHAT_ID):
+        problems.append(
+            "FREQTRADE__TELEGRAM__ENABLED is true but the token/chat_id are "
+            "still the .env.example placeholders — create a bot with "
+            "@BotFather, get your chat_id, and fill both values in .env "
+            "(see README: Telegram)"
+        )
+        return problems
+    if not token:
+        problems.append(
+            "FREQTRADE__TELEGRAM__ENABLED is true but FREQTRADE__TELEGRAM__TOKEN "
+            "is missing/empty — the bot would abort at startup and restart-loop"
+        )
+    elif not TELEGRAM_TOKEN_RE.match(token):
+        problems.append(
+            "FREQTRADE__TELEGRAM__TOKEN does not look like a bot token "
+            "(expected '<bot-id>:<hash>' from @BotFather) — the bot would "
+            "abort at startup and restart-loop"
+        )
+    if not chat_id:
+        problems.append(
+            "FREQTRADE__TELEGRAM__ENABLED is true but FREQTRADE__TELEGRAM__CHAT_ID "
+            "is missing/empty — freqtrade has no chat to send to or accept "
+            "commands from"
+        )
+    elif not TELEGRAM_CHAT_ID_RE.match(chat_id):
+        problems.append(
+            "FREQTRADE__TELEGRAM__CHAT_ID must be a numeric chat id "
+            "(possibly negative for groups) or an @channelname; got "
+            f"{chat_id!r}"
+        )
     return problems
 
 
@@ -299,9 +388,9 @@ def main(argv: list[str] | None = None) -> int:
     # Environment overrides first: a protected-key FREQTRADE__* var poisons
     # the whole run — the bot would execute values the file-based checks
     # below never saw. Same refusal class as a gate violation (exit 1).
-    env_problems = check_env_overrides(os.environ)
+    env_problems = check_env_overrides(os.environ) + check_telegram_env(os.environ)
     if env_problems:
-        print("REFUSED: FREQTRADE__* environment override(s) of protected key(s)",
+        print("REFUSED: unsafe environment configuration",
               file=sys.stderr)
         for problem in env_problems:
             print(f"  - {problem}", file=sys.stderr)

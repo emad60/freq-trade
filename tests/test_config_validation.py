@@ -287,3 +287,124 @@ def test_freqtrade_env_override_of_other_keys_still_passes(tmp_path):
         {"FREQTRADE__EXCHANGE__KEY": "k", "FREQTRADE__API_SERVER__WS_TOKEN": "t"},
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# --- Phase 7: a half-configured Telegram setup must fail at the gate ----------
+#
+# FREQTRADE__TELEGRAM__ENABLED=true with a placeholder/malformed token makes
+# freqtrade abort at startup — and it exits 0 on config errors, so the
+# container would restart-loop forever. The gate refuses it instead.
+
+# A token that passes the bot-token SHAPE but is still the shipped example —
+# this is exactly why placeholder equality is checked in addition to shape.
+GOOD_SHAPED_TOKEN = "123456789:AAExampleTokenForTests_0000000000000000000"
+
+
+def test_telegram_disabled_with_placeholders_passes(tmp_path):
+    # The shipped default: ENABLED=false, placeholders in place — untouched.
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__TELEGRAM__ENABLED": "false",
+         "FREQTRADE__TELEGRAM__TOKEN": "0000000000:AAExample_Token_Placeholder_Not_Real_000",
+         "FREQTRADE__TELEGRAM__CHAT_ID": "000000000"},
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_telegram_enabled_with_placeholder_token_is_refused(tmp_path):
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__TELEGRAM__ENABLED": "true",
+         "FREQTRADE__TELEGRAM__TOKEN": "0000000000:AAExample_Token_Placeholder_Not_Real_000",
+         "FREQTRADE__TELEGRAM__CHAT_ID": "12345"},
+    )
+    assert proc.returncode == 1
+    assert "placeholders" in proc.stderr
+
+
+def test_telegram_enabled_with_placeholder_chat_id_is_refused(tmp_path):
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__TELEGRAM__ENABLED": "true",
+         "FREQTRADE__TELEGRAM__TOKEN": GOOD_SHAPED_TOKEN,
+         "FREQTRADE__TELEGRAM__CHAT_ID": "000000000"},
+    )
+    assert proc.returncode == 1
+    assert "placeholders" in proc.stderr
+
+
+@pytest.mark.parametrize("token", [
+    "", "not-a-token", "123456:short",
+    # unicode \d bypass: Arabic-Indic digits are \d without re.ASCII
+    "٨٦١١٩٢٩٠٠٨:AAExampleTokenForUnicodeShape_00000000000",
+])
+def test_telegram_enabled_with_malformed_token_is_refused(tmp_path, token):
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__TELEGRAM__ENABLED": "true",
+         "FREQTRADE__TELEGRAM__TOKEN": token,
+         "FREQTRADE__TELEGRAM__CHAT_ID": "12345"},
+    )
+    assert proc.returncode == 1, token
+    assert "FREQTRADE__TELEGRAM__TOKEN" in proc.stderr
+
+
+@pytest.mark.parametrize("chat_id", [
+    "", "chat id with spaces",
+    # unicode \w bypass: Cyrillic is \w without re.ASCII
+    "@бот_канал",
+])
+def test_telegram_enabled_with_malformed_chat_id_is_refused(tmp_path, chat_id):
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__TELEGRAM__ENABLED": "true",
+         "FREQTRADE__TELEGRAM__TOKEN": GOOD_SHAPED_TOKEN,
+         "FREQTRADE__TELEGRAM__CHAT_ID": chat_id},
+    )
+    assert proc.returncode == 1, chat_id
+    assert "FREQTRADE__TELEGRAM__CHAT_ID" in proc.stderr
+
+
+def test_telegram_enabled_with_shaped_token_and_chat_passes(tmp_path):
+    # The intended Phase 7 setup: a real-shaped token and numeric chat id.
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__TELEGRAM__ENABLED": "true",
+         "FREQTRADE__TELEGRAM__TOKEN": GOOD_SHAPED_TOKEN,
+         "FREQTRADE__TELEGRAM__CHAT_ID": "123456789"},
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_telegram_placeholders_pinned_against_env_example():
+    """The gate's placeholder constants are duplicated from .env.example
+    (the container cannot read it) — this test is the drift alarm."""
+    from validate_config import (TELEGRAM_PLACEHOLDER_CHAT_ID,
+                                 TELEGRAM_PLACEHOLDER_TOKEN)
+    example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
+        encoding="utf-8")
+    assert f"FREQTRADE__TELEGRAM__TOKEN={TELEGRAM_PLACEHOLDER_TOKEN}" in example
+    assert f"FREQTRADE__TELEGRAM__CHAT_ID={TELEGRAM_PLACEHOLDER_CHAT_ID}" in example
+
+
+# --- no credentials in tracked config files -----------------------------------
+
+
+def test_real_token_in_config_file_is_refused(tmp_path):
+    # Caught live on day one of Phase 7: a token pasted into the tracked
+    # config was one `git add` away from git history. The gate refuses it.
+    config = {**DRYRUN_CONFIG, "telegram": {
+        "enabled": True, "token": "1111999999:AAExampleTokenShape_0000000000",
+        "chat_id": "999999999"}}
+    proc = run_validator(tmp_path, config)
+    assert proc.returncode == 1
+    assert "telegram.token" in proc.stderr
+    assert ".env" in proc.stderr
+
+
+def test_empty_telegram_block_in_config_passes(tmp_path):
+    # The shipped layout: placeholders stay in .env; the config block is inert.
+    config = {**DRYRUN_CONFIG, "telegram": {
+        "enabled": False, "token": "", "chat_id": ""}}
+    proc = run_validator(tmp_path, config)
+    assert proc.returncode == 0, proc.stderr

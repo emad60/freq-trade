@@ -19,7 +19,7 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 6 — dry-run running StarterStrategyV2
+## Status: Phase 7 — Telegram monitoring live; dry-run running StarterStrategyV2
 
 The dry-run clock started **2026-09-07** (V1) and the bot was switched to
 **StarterStrategyV2** on **2026-09-08** (Phase 5b outcome) — the switch
@@ -29,6 +29,10 @@ and only then via the manual checklist. V2 is the Phase 5b iteration: still
 expectancy unchanged) but strictly less-bad in every regime, with ⅓ the
 trades and an 11.3% worst drawdown that stays inside the hardcoded −15%
 runtime kill. See `docs/BACKTEST_RESULTS.md` (Phase 5b section).
+
+Telegram (Phase 7) is **live**: the bot's native RPC listens for operator
+commands and the watchdog pushes breach/error/unreachable notifications to
+the same chat — see [Telegram (Phase 7)](#telegram-phase-7).
 
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
@@ -45,7 +49,7 @@ config `fee` is a **ratio**, not a percent).
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ✅ done |
 | 5b | Strategy iteration from backtest data (`StarterStrategyV2`) | ✅ done 2026-09-08 |
 | 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ running V2 since 2026-09-08 (clock ends ~09-22 at the earliest) |
-| 7 | Telegram monitoring & kill-switch | ⬜ |
+| 7 | Telegram monitoring & kill-switch | ✅ done 2026-09-08 — RPC + watchdog notifications live |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
 
@@ -76,8 +80,9 @@ from outside the strategy class — test suite AND start path), and the
 read-only; freqtrade 2026.8 removed config-level Protections and the
 strategy-class alternative would put risk enforcement *inside* strategy
 logic, so the runtime daily-loss/drawdown watchdog is owned by this module
-and consumed by the dry-run watchdog container (Phase 6) and the Telegram
-kill-switch (Phase 7)).
+and consumed by the dry-run watchdog container (Phase 6), which escalates
+its verdicts to Telegram (Phase 7); the Telegram "kill-switch" itself is
+the operator's manual `/stop` from the same chat).
 
 ## Dry-run (Phase 6)
 
@@ -107,6 +112,63 @@ Two containers, one job each:
 Stopping the bot deliberately does NOT close positions (freqtrade semantics);
 positions keep being managed while entries stop. Full exit is
 `docker compose stop` (operator action, not automatic).
+
+## Telegram (Phase 7)
+
+One bot, two surfaces, one switch — `FREQTRADE__TELEGRAM__ENABLED=true` in
+`.env` (plus `FREQTRADE__TELEGRAM__TOKEN` from @BotFather and
+`FREQTRADE__TELEGRAM__CHAT_ID`, your numeric user id — @userinfobot tells
+you, or press Start on your bot and read `getUpdates`). After changing
+`.env`, recreate so the containers re-read it:
+`docker compose up -d --force-recreate freqtrade watchdog`.
+
+**Operator commands (native freqtrade RPC)** — send these in your chat;
+only your `chat_id` is authorized:
+
+| Command | Effect |
+|---|---|
+| `/status` | open trades and their live P/L |
+| `/profit` | cumulative performance summary |
+| `/daily` | per-day P/L |
+| `/balance` | wallet balance |
+| `/forceexit <id>` (`/fx`) | exit a specific position immediately |
+| `/stopentry` | stop opening new trades; existing ones keep being managed |
+| `/stop` | full halt (same endpoint the watchdog uses) |
+| `/start` | resume after a stop |
+| `/reload_config` | reload config from disk (risk caps stay hardcoded) |
+
+**Watchdog notifications** — the watchdog sends a message when it: detects
+a risk breach and stops the bot (with the breach details and stop result);
+finds a breach but cannot stop the bot (missing API credentials); fails to
+audit (bad DB/config — trading not stopped, retry next cycle); cannot reach
+the bot's API (after one 15 s grace re-ping, so a stack restart doesn't
+false-alarm). Each kind is cooldown-limited
+(`WATCHDOG_NOTIFY_COOLDOWN_SECONDS`, default 3600): a persistent condition
+notifies once per hour, not once per 5-min cycle. Telegram disabled
+(`ENABLED=false`) makes notifications fully inert — the watchdog still
+stops the bot and logs exactly as before. Verify delivery on demand with:
+
+```bash
+docker compose exec watchdog python3 /freqtrade/scripts/watchdog.py --notify-test
+```
+
+**Gate integration:** `FREQTRADE__TELEGRAM__ENABLED=true` with missing,
+placeholder, or malformed token/chat_id is REFUSED by the safety gate —
+freqtrade aborts on a bad token and exits 0 doing it, so without this the
+container would restart-loop forever. The placeholder constants are pinned
+against `.env.example` by a test (drift alarm). A syntactically valid but
+wrong token can only be caught by Telegram itself at startup (loud, in
+`docker compose logs freqtrade`). The gate also refuses a non-empty
+`telegram.token` inside the config file itself — credentials belong only
+in `.env` (caught live on day one: a token pasted into the tracked config
+was one `git add` away from git history).
+
+**Security properties:** the token and chat_id live only in `.env`
+(git-ignored) and are injected as env vars; the token is scrubbed from any
+error detail the watchdog logs; nothing is ever logged from notification
+bodies that could leak credentials; no inbound ports are opened for
+Telegram (outbound HTTPS to api.telegram.org only); commands are accepted
+solely from the configured chat_id.
 
 ## StarterStrategy (Phase 3) & StarterStrategyV2 (Phase 5b)
 
@@ -186,7 +248,8 @@ tests/                pytest suite — config validation (Phase 2), strategy
 scripts/              validate_config.py (safety gate) + risk_guard.py
                       (hardcoded risk limits, check-account audit) +
                       backtest_ranges.py / run_backtest.sh (Phase 5 harness);
-                      watchdog.py + check_account.sh (Phase 6 runtime audit)
+                      watchdog.py + check_account.sh (Phase 6 runtime audit,
+                      Phase 7 Telegram escalation)
 docs/                 BACKTEST_RESULTS.md (Phase 5, honest per-regime
                       results); SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md
                       as later phases land

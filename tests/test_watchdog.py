@@ -1,12 +1,15 @@
-"""Tests for the Phase 6 dry-run watchdog (scripts/watchdog.py) and the
-shared read-only read_trades() helper in risk_guard.py.
+"""Tests for the Phase 6 dry-run watchdog (scripts/watchdog.py), its Phase 7
+Telegram notifications, and the shared read-only read_trades() helper in
+risk_guard.py.
 
-The decision function (run_once) is tested with an injected stop_fn so no
-test ever touches a real bot; stop_bot itself is tested against a local
-stub HTTP server that records the requests it receives.
+The decision function (run_once) is tested with injected stop_fn/ping_fn and
+a recording notify so no test ever touches a real bot or the real Bot API;
+stop_bot and send_telegram are tested against local stub HTTP servers that
+record the requests they receive.
 """
 
 import base64
+import http.client
 import json
 import os
 import sqlite3
@@ -279,10 +282,49 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
             config_path=make_config(tmp_path / "c.json"),
-            api_url="http://bot:8080", stop_fn=stop, ping_fn=lambda url, timeout=5.0: False)
+            api_url="http://bot:8080", stop_fn=stop,
+            ping_fn=lambda url, timeout=5.0: False, ping_grace_seconds=0)
         assert status == "ok"  # account within limits — liveness is a warning
         assert stop.calls == []
         assert "WARNING" in capsys.readouterr().out
+
+    def test_ping_failure_within_grace_is_rescued(self, tmp_path, capsys):
+        """Stack-restart race: the bot's API opens seconds after the
+        watchdog's first ping. One retry after the grace sleep must clear
+        it — no warning, no Telegram false alarm."""
+        notify, calls = recording_notify()
+        pings = []
+        sleeps = []
+
+        def flaky_ping(url, timeout=5.0):
+            pings.append(url)
+            return len(pings) > 1  # down once, then up
+
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=RecordingStop(),
+            ping_fn=flaky_ping, notify=notify,
+            ping_grace_seconds=15.0, sleep_fn=sleeps.append)
+        assert status == "ok"
+        assert len(pings) == 2
+        assert sleeps == [15.0]
+        assert calls == []
+        assert "WARNING" not in capsys.readouterr().out
+
+    def test_ping_failure_beyond_grace_still_warns(self, tmp_path, capsys):
+        notify, calls = recording_notify()
+        pings = []
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=RecordingStop(),
+            ping_fn=lambda url, timeout=5.0: pings.append(url) or False,
+            notify=notify, ping_grace_seconds=15.0, sleep_fn=lambda s: None)
+        assert status == "ok"
+        assert len(pings) == 2  # grace retried exactly once
+        assert "WARNING" in capsys.readouterr().out
+        assert [kind for kind, _ in calls] == ["unreachable"]
 
     def test_ping_receives_the_configured_api_url(self, tmp_path):
         seen = []
@@ -306,6 +348,316 @@ class TestRunOnce:
 
 
 # ---------------------------------------------------------------------------
+# watchdog.send_telegram — the actual Bot API call, against a local stub
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def stub_telegram():
+    """A local HTTP server recording sendMessage POSTs (path + JSON body);
+    tests may flip handler.status / handler.body."""
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        status = 200
+        body = b'{"ok": true, "result": {"message_id": 1}}'
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            requests.append((self.path, payload))
+            self.send_response(Handler.status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(Handler.body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield SimpleNamespace(
+            url=f"http://127.0.0.1:{server.server_port}",
+            requests=requests,
+            handler=Handler,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestSendTelegram:
+    def test_posts_chat_id_and_text_to_bot_endpoint(self, stub_telegram):
+        ok, _ = watchdog.send_telegram(stub_telegram.url, "123:ABC", "42", "hello")
+        assert ok is True
+        assert stub_telegram.requests == [
+            ("/bot123:ABC/sendMessage", {"chat_id": "42", "text": "hello"})
+        ]
+
+    def test_http_error_body_is_returned_with_token_scrubbed(self, stub_telegram):
+        # The Bot API echoes nothing sensitive, but a future edit must not be
+        # able to leak the token into the logs via the detail string either.
+        stub_telegram.handler.status = 401
+        stub_telegram.handler.body = b'{"description": "bad token SECRET-TOK"}'
+        ok, detail = watchdog.send_telegram(
+            stub_telegram.url, "SECRET-TOK", "42", "hi")
+        assert ok is False
+        assert "HTTP 401" in detail
+        assert "SECRET-TOK" not in detail
+        assert "<token>" in detail
+
+    def test_connection_refused_is_reported_not_raised(self):
+        ok, detail = watchdog.send_telegram(
+            "http://127.0.0.1:1", "123:ABC", "42", "hi", timeout=2)
+        assert ok is False
+        assert detail
+
+
+class TestNeverRaisesContract:
+    """http.client raises exceptions that are NOT OSError (BadStatusLine,
+    LineTooLong, IncompleteRead). The three network functions guarantee
+    (ok, detail) / bool — a raised exception would kill the restart-on-failure
+    watchdog loop (silent enforcement loss), or strike mid-stop."""
+
+    @pytest.mark.parametrize("exc", [
+        http.client.BadStatusLine("???"),
+        http.client.LineTooLong("header"),
+    ])
+    def test_transport_exceptions_become_failure_values(self, exc, monkeypatch):
+        def boom(*a, **k):
+            raise exc
+
+        monkeypatch.setattr(watchdog.urllib.request, "urlopen", boom)
+        ok, detail = watchdog.send_telegram("http://x", "SECRET-TOK", "1", "hi")
+        assert ok is False
+        assert type(exc).__name__ in detail
+        assert "SECRET-TOK" not in detail
+        ok, detail = watchdog.stop_bot("http://x", "u", "p")
+        assert ok is False and type(exc).__name__ in detail
+        assert watchdog.ping_bot("http://x") is False
+
+
+# ---------------------------------------------------------------------------
+# watchdog.notify_event — per-kind cooldown over the enabled/creds gates
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tg_enabled(monkeypatch):
+    monkeypatch.setenv("FREQTRADE__TELEGRAM__ENABLED", "true")
+    monkeypatch.setenv("FREQTRADE__TELEGRAM__TOKEN", "123456:AATEST")
+    monkeypatch.setenv("FREQTRADE__TELEGRAM__CHAT_ID", "42")
+
+
+@pytest.fixture
+def recorded_send(monkeypatch):
+    """Replace the real Bot API call with a recording stand-in."""
+    calls = []
+
+    def send(api_base, token, chat_id, text, timeout=10.0):
+        calls.append((api_base, token, chat_id, text))
+        return True, '{"ok": true}'
+
+    monkeypatch.setattr(watchdog, "send_telegram", send)
+    return calls
+
+
+class TestNotifyEvent:
+    def test_disabled_is_a_silent_noop(self, monkeypatch, recorded_send):
+        monkeypatch.delenv("FREQTRADE__TELEGRAM__ENABLED", raising=False)
+        state = {}
+        assert watchdog.notify_event(state, "breach", "t", 100.0) is False
+        assert recorded_send == []
+        assert state == {}  # nothing marked: no cooldown churn while off
+
+    def test_enabled_sends_and_marks_state(self, tg_enabled, recorded_send):
+        state = {}
+        assert watchdog.notify_event(state, "breach", "BREACH!", 100.0) is True
+        assert recorded_send == [(watchdog.TELEGRAM_API_BASE, "123456:AATEST",
+                                  "42", "BREACH!")]
+        assert state == {"breach": 100.0}
+
+    def test_same_kind_within_cooldown_is_suppressed(self, tg_enabled,
+                                                     recorded_send,
+                                                     monkeypatch):
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        state = {}
+        assert watchdog.notify_event(state, "error", "a", 100.0) is True
+        assert watchdog.notify_event(state, "error", "a", 3699.0) is False
+        assert len(recorded_send) == 1
+
+    def test_other_kind_is_not_blocked_by_first_kind_cooldown(self,
+                                                              tg_enabled,
+                                                              recorded_send,
+                                                              monkeypatch):
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        state = {}
+        watchdog.notify_event(state, "error", "a", 100.0)
+        assert watchdog.notify_event(state, "unreachable", "b", 100.5) is True
+        assert len(recorded_send) == 2
+
+    def test_after_cooldown_sends_again(self, tg_enabled, recorded_send,
+                                        monkeypatch):
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        state = {}
+        watchdog.notify_event(state, "error", "a", 100.0)
+        assert watchdog.notify_event(state, "error", "a", 3700.0) is True
+        assert len(recorded_send) == 2
+
+    def test_failed_send_does_not_mark_state_so_next_cycle_retries(
+            self, tg_enabled, recorded_send, monkeypatch):
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        monkeypatch.setattr(watchdog, "send_telegram",
+                            lambda *a, **k: (False, "boom"))
+        state = {}
+        assert watchdog.notify_event(state, "error", "a", 100.0) is False
+        assert state == {}
+        assert watchdog.notify_event(state, "error", "a", 100.0) is False
+        # retried — with the recorder restored we count attempts instead
+        assert recorded_send == []
+
+    def test_credentials_are_stripped_before_sending(self, monkeypatch,
+                                                     recorded_send):
+        # .env values may carry stray whitespace; the validator strips before
+        # its shape check, so the watchdog must strip before sending too —
+        # otherwise a passing-gate token fails at the Bot API every cycle.
+        monkeypatch.setenv("FREQTRADE__TELEGRAM__ENABLED", "true")
+        monkeypatch.setenv("FREQTRADE__TELEGRAM__TOKEN", " 123456:AATEST ")
+        monkeypatch.setenv("FREQTRADE__TELEGRAM__CHAT_ID", " 42 ")
+        state = {}
+        assert watchdog.notify_event(state, "breach", "x", 1.0) is True
+        assert recorded_send == [(watchdog.TELEGRAM_API_BASE, "123456:AATEST",
+                                  "42", "x")]
+
+    def test_missing_credentials_while_enabled_warn_once_per_cooldown(
+            self, tg_enabled, monkeypatch, capsys):
+        monkeypatch.delenv("FREQTRADE__TELEGRAM__TOKEN", raising=False)
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        state = {}
+        assert watchdog.notify_event(state, "breach", "a", 100.0) is False
+        assert state == {"breach": 100.0}  # marked: misconfig, not transient
+        out = capsys.readouterr().out
+        assert "WARNING" in out and "token/chat_id missing" in out
+        assert watchdog.notify_event(state, "breach", "a", 200.0) is False
+        assert "token/chat_id missing" not in capsys.readouterr().out
+
+
+class TestMakeNotifier:
+    def test_state_persists_across_calls(self, tg_enabled, recorded_send,
+                                         monkeypatch):
+        # The loop-mode contract: one notifier for the process lifetime means
+        # the second call within the cooldown window is suppressed.
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        notify = watchdog.make_notifier()
+        assert notify("error", "a") is True
+        assert notify("error", "a") is False
+        assert len(recorded_send) == 1
+
+    def test_explicit_state_dict_is_used(self, tg_enabled, recorded_send):
+        state = {}
+        notify = watchdog.make_notifier(state)
+        notify("breach", "x")
+        assert "breach" in state
+
+
+# ---------------------------------------------------------------------------
+# watchdog.run_once — notification wiring on each decision path
+# ---------------------------------------------------------------------------
+
+def recording_notify():
+    calls = []
+
+    def notify(kind, text):
+        calls.append((kind, text))
+        return True
+
+    return notify, calls
+
+
+class TestRunOnceNotifications:
+    def test_clean_account_notifies_nothing(self, tmp_path):
+        notify, calls = recording_notify()
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://unused", stop_fn=RecordingStop(),
+            ping_fn=recording_ping, notify=notify)
+        assert status == "ok"
+        assert calls == []
+
+    def test_idle_notifies_nothing(self, tmp_path):
+        notify, calls = recording_notify()
+        status = watchdog.run_once(
+            NOW, db_path=str(tmp_path / "nope.sqlite"),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://unused", stop_fn=RecordingStop(),
+            ping_fn=recording_ping, notify=notify)
+        assert status == "idle"
+        assert calls == []
+
+    def test_breach_notifies_breach_with_stop_result(self, tmp_path, creds):
+        notify, calls = recording_notify()
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", [BREACH_ROW]),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=RecordingStop(),
+            ping_fn=recording_ping, notify=notify)
+        assert status == "stopped"
+        assert len(calls) == 1
+        kind, text = calls[0]
+        assert kind == "breach"
+        assert "issued" in text  # the stop succeeded
+        assert "daily loss" in text  # and the operator learns why
+
+    def test_breach_without_credentials_notifies_no_credentials(
+            self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FREQTRADE__API_SERVER__USERNAME", raising=False)
+        monkeypatch.delenv("FREQTRADE__API_SERVER__PASSWORD", raising=False)
+        notify, calls = recording_notify()
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", [BREACH_ROW]),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=RecordingStop(),
+            ping_fn=recording_ping, notify=notify)
+        assert status == "stopped-no-credentials"
+        assert [kind for kind, _ in calls] == ["no_credentials"]
+        assert "daily loss" in calls[0][1]
+
+    def test_audit_error_notifies_error(self, tmp_path):
+        notify, calls = recording_notify()
+        cfg = tmp_path / "c.json"
+        cfg.write_text("{oops")
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=str(cfg), api_url="http://unused",
+            stop_fn=RecordingStop(), ping_fn=recording_ping, notify=notify)
+        assert status == "error"
+        assert [kind for kind, _ in calls] == ["error"]
+
+    def test_unreachable_bot_notifies_unreachable(self, tmp_path):
+        notify, calls = recording_notify()
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=RecordingStop(),
+            ping_fn=lambda url, timeout=5.0: False, notify=notify,
+            ping_grace_seconds=0)
+        assert status == "ok"  # liveness is a warning, not a breach
+        assert [kind for kind, _ in calls] == ["unreachable"]
+
+    def test_default_notifier_reads_env_not_tests(self, tmp_path, monkeypatch):
+        """No notify injected: the default notifier must consult the real
+        env (disabled on the host) and never raise into the cycle."""
+        monkeypatch.delenv("FREQTRADE__TELEGRAM__ENABLED", raising=False)
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://unused", stop_fn=RecordingStop(),
+            ping_fn=recording_ping)
+        assert status == "ok"
+
+
+# ---------------------------------------------------------------------------
 # CLI wiring: --once maps statuses to exit codes
 # ---------------------------------------------------------------------------
 
@@ -322,6 +674,29 @@ class TestMainOnce:
     def test_error_exits_one(self, monkeypatch):
         monkeypatch.setattr(watchdog, "run_once", lambda *a, **k: "error")
         assert watchdog.main(["--once"]) == 1
+
+
+class TestNotifyTestFlag:
+    """--notify-test: the operator's on-demand delivery self-test."""
+
+    def test_disabled_exits_one_with_setup_hint(self, monkeypatch, capsys):
+        monkeypatch.delenv("FREQTRADE__TELEGRAM__ENABLED", raising=False)
+        assert watchdog.main(["--notify-test"]) == 1
+        err = capsys.readouterr().err
+        assert "disabled" in err and "FREQTRADE__TELEGRAM__ENABLED" in err
+
+    def test_enabled_sends_test_message_and_exits_zero(self, tg_enabled,
+                                                       recorded_send,
+                                                       monkeypatch):
+        monkeypatch.setattr(watchdog, "NOTIFY_COOLDOWN_SECONDS", 3600)
+        assert watchdog.main(["--notify-test"]) == 0
+        assert len(recorded_send) == 1
+        assert "test notification" in recorded_send[0][3]
+
+    def test_failed_send_exits_one(self, tg_enabled, monkeypatch):
+        monkeypatch.setattr(watchdog, "send_telegram",
+                            lambda *a, **k: (False, "boom"))
+        assert watchdog.main(["--notify-test"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -351,4 +726,32 @@ class TestIntervalParsing:
             capture_output=True, text=True, env=env,
         )
         # On the host the default DB path doesn't exist -> 'idle' -> exit 0.
+        assert proc.returncode == 0, proc.stderr
+
+
+class TestCooldownParsing:
+    """Same fail-fast contract as WATCHDOG_INTERVAL_SECONDS: parsed at import
+    time in a restart-on-failure container, so a bad value must die with a
+    clear message, never a traceback loop."""
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("abc", "must be an integer"), ("0", ">= 60"), ("59", ">= 60")],
+    )
+    def test_bad_cooldown_fails_fast_with_message(self, tmp_path, raw, message):
+        env = dict(os.environ, WATCHDOG_NOTIFY_COOLDOWN_SECONDS=raw)
+        proc = subprocess.run(
+            [sys.executable, str(watchdog.__file__), "--once"],
+            capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode != 0
+        assert message in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_valid_cooldown_starts(self, tmp_path):
+        env = dict(os.environ, WATCHDOG_NOTIFY_COOLDOWN_SECONDS="120")
+        proc = subprocess.run(
+            [sys.executable, str(watchdog.__file__), "--once"],
+            capture_output=True, text=True, env=env,
+        )
         assert proc.returncode == 0, proc.stderr
