@@ -101,6 +101,12 @@ Per-pair (full sample): BTC 58 trades −$1.58, ETH 61 −$1.23, SOL 36 −$2.09
 
 ## Decision point (operator's call)
 
+*Decision taken: **(c)** — the dry-run started 2026-09-07 with StarterStrategy
+while Phase 5b iterated offline on this same harness. The iteration produced
+`StarterStrategyV2` (section below); the dry-run was switched to it on
+2026-09-08, one day into the gate — the 2–4 week clock restarted with the
+switch, costing one day.*
+
 - **(a) Proceed to Phase 6 dry-run with the current strategy.** Validates
   the full runtime stack (watchdog, kill-switch wiring, API, logs) with
   real market data while costing nothing but time. Downside: the dry-run
@@ -119,10 +125,78 @@ Per-pair (full sample): BTC 58 trades −$1.58, ETH 61 −$1.23, SOL 36 −$2.09
 Under no plan does live trading unlock early: the Phase 9 manual gate and
 the full dry-run period stand regardless.
 
+## Phase 5b — StarterStrategyV2 (2026-09-08)
+
+V2 subclasses V1 and changes exactly three things, each a hypothesis aimed at
+the exit breakdown above:
+
+1. **H1 reclaim confirmation** — entry additionally requires the candle to
+   close above the *prior candle's high* (attacks the 88 `stop_loss` exits:
+   RSI-30 crosses alone kept buying falling knives).
+2. **H2 rising EMA(200)** — entry additionally requires EMA(200) higher than
+   24 candles ago (attacks dead-regime entries: `close > EMA200` alone was
+   satisfied nearly all through the losing bull sample).
+3. **H3 momentum-fade exit** — exit when RSI(14) crosses down through 60
+   (banks profits when momentum fades, before the stop or +5% ROI does).
+
+Method identical to the tables above — same windows, same data, same gated
+config, same fee/stress runs. **Harness-reproducibility check:** V1 was
+re-run on the full sample in the same session and reproduced the documented
+numbers exactly (155 trades, −24.47%, 28.26% DD), so the comparison below is
+apples-to-apples. Result zips: `{bear,sideways,bull,full}_v2.zip`,
+`full_v2_fee_stress.zip`, `full_v1_recheck.zip`.
+
+### Results: V1 vs V2
+
+| Sample | V1: trades / win% / total / DD | V2: trades / win% / total / DD |
+|---|---|---|
+| bear | 26 / 19.2% / −3.24% / 5.76% | 9 / 22.2% / **−1.18%** / 2.69% |
+| sideways | 11 / 18.2% / −0.88% / 3.28% | 4 / 50.0% / **+0.40%** / 1.03% |
+| bull | 20 / 10.0% / −6.57% / 7.79% | 6 / 16.7% / **−2.30%** / 2.30% |
+| full (5.3 yr) | 155 / 19.4% / **−24.47%** / 28.26% | 53 / 28.3% / **−8.80%** / 11.34% |
+| full, 0.2% fee | — / — / −34.15% / 36.40% | 53 / 28.3% / **−12.77%** / 14.80% |
+
+V2 full-sample exit breakdown:
+
+| Exit reason | Trades | Avg result |
+|---|---|---|
+| `stop_loss` | 29 | −1.59% |
+| `trailing_stop_loss` | 9 | −1.36% |
+| `rsi_overbought` | 7 | +2.21% |
+| `rsi_fading` (new) | 6 | +1.73% |
+| `roi` | 2 | +5.00% |
+
+### Reading it honestly
+
+1. **Still no edge — but strictly less-bad, in every sample.** V2 loses
+   less everywhere, cuts the trade count by ~⅔, and halves the full-sample
+   drawdown (11.34%, which would NOT have tripped the hardcoded −15%
+   runtime kill, unlike V1's 28.26% path).
+2. **The improvement is volume reduction, not per-trade quality.** Average
+   win +2.39% (15 wins) vs average loss −1.54% (38 losses) is a 1:1.55
+   risk/reward, so breakeven needs a ~39% win rate; V2 delivers 28.3%.
+   Per-trade expectancy is essentially unchanged: V1 −0.40%/trade,
+   V2 −0.43%/trade. H3 deliberately banks smaller wins — it shrank the
+   risk/reward — while H1/H2 removed roughly two thirds of the trades.
+   The aggregate bleed shrank because there are fewer trades to bleed on.
+3. **The sideways +0.40% is 4 trades.** Noise. Do not read a regime
+   specialization into it.
+4. **Fee stress degrades V2 far less** (−8.80% → −12.77%, a 4.0pp drag vs
+   V1's 9.7pp): fewer trades means less fee exposure. The ~0.2%/round-trip
+   hurdle from the Phase 5 lessons still stands, and V2's fee-stress
+   drawdown (14.80%) sits right at the runtime −15% kill line.
+5. **Honest conclusion:** V2 is the better of two losing strategies — a
+   genuine, measured improvement, not an edge. It is what dry-runs from
+   2026-09-08 onward. Any further iteration must attack per-trade
+   expectancy (the R:R collapse from H3 suggests the exit side needs
+   work), and each such change re-runs this harness with the full sample
+   as the overfit guard.
+
 ## Reproduce
 
 ```bash
 scripts/run_backtest.sh bear            # also: sideways | bull | full
 scripts/run_backtest.sh full --stress-fee   # 0.2% per side
+scripts/run_backtest.sh full --strategy StarterStrategyV2   # Phase 5b V2
 python3 scripts/backtest_ranges.py list     # regime windows
 ```

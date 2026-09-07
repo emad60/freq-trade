@@ -9,7 +9,7 @@
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
     "fee": 0.001,
-    "strategy": "StarterStrategy",
+    "strategy": "StarterStrategyV2",
     "unfilledtimeout": {
         "entry": 10,
         "exit": 10,

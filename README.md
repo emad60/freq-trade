@@ -19,15 +19,16 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 6 — dry-run started (paper trading)
+## Status: Phase 6 — dry-run running StarterStrategyV2
 
-The dry-run clock started **2026-09-07**; the go-live gate is a minimum
-**2–4 weeks** of unattended dry-run (Phase 9 can never open before
-~2026-09-21, and only then via the manual checklist). Option (c) is in
-flight: the runtime stack validates against real market data while the
-strategy is iterated offline in parallel (`docs/BACKTEST_RESULTS.md`
-holds the Phase 5 verdict: containment works, the starter strategy has no
-edge — live stays gated regardless).
+The dry-run clock started **2026-09-07** (V1) and the bot was switched to
+**StarterStrategyV2** on **2026-09-08** (Phase 5b outcome) — the switch
+restarted the 2–4 week gate, which now ends ~2026-09-22 at the earliest,
+and only then via the manual checklist. V2 is the Phase 5b iteration: still
+**no edge** (−8.8% vs V1's −24.5% over the 5.3-year sample, per-trade
+expectancy unchanged) but strictly less-bad in every regime, with ⅓ the
+trades and an 11.3% worst drawdown that stays inside the hardcoded −15%
+runtime kill. See `docs/BACKTEST_RESULTS.md` (Phase 5b section).
 
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
@@ -42,7 +43,8 @@ config `fee` is a **ratio**, not a percent).
 | 3 | Starter strategy — deterministic, no ML | ✅ done |
 | 4 | Hardcoded risk management layer (`risk_guard.py`) | ✅ done |
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ✅ done |
-| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ started 2026-09-07 (clock ends ~09-21 at the earliest) |
+| 5b | Strategy iteration from backtest data (`StarterStrategyV2`) | ✅ done 2026-09-08 |
+| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ running V2 since 2026-09-08 (clock ends ~09-22 at the earliest) |
 | 7 | Telegram monitoring & kill-switch | ⬜ |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
@@ -103,7 +105,7 @@ Stopping the bot deliberately does NOT close positions (freqtrade semantics);
 positions keep being managed while entries stop. Full exit is
 `docker compose stop` (operator action, not automatic).
 
-## StarterStrategy (Phase 3)
+## StarterStrategy (Phase 3) & StarterStrategyV2 (Phase 5b)
 
 `user_data/strategies/StarterStrategy.py` — deterministic, long-only, 1h
 timeframe, zero ML:
@@ -116,6 +118,15 @@ timeframe, zero ML:
 - **Stop:** ATR(14)-sized at 2×ATR below entry via `custom_stoploss`,
   hard-capped at **1.5%** per trade (`stoploss = -0.015` is the static floor;
   Phase 4's `risk_guard.py` re-enforces the cap *outside* the strategy).
+
+`user_data/strategies/StarterStrategyV2.py` (what the dry-run runs now)
+subclasses it with exactly three hypothesis-driven changes from the Phase 5
+exit data: **H1** entry also requires closing above the prior candle's high
+(reclaim — stops knife-catching), **H2** entry also requires EMA(200) higher
+than 24 candles ago (rising regime), **H3** new exit when RSI(14) crosses
+down through 60 (`rsi_fading`). Everything else — indicator math, ATR/1.5%
+stop, ROI, risk posture — is inherited. Backtest comparison in
+`docs/BACKTEST_RESULTS.md` (Phase 5b): less-bad everywhere, still no edge.
 
 Indicators are plain pandas (Wilder-smoothed RSI/ATR, standard EMA) so the
 tests run without TA-Lib; `tests/test_strategy_signals.py` verifies them

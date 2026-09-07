@@ -5,12 +5,16 @@
 # configured to run.
 #
 # Usage:
-#   scripts/run_backtest.sh <bear|sideways|bull|full> [--stress-fee]
+#   scripts/run_backtest.sh <bear|sideways|bull|full> [--stress-fee] [--strategy NAME]
 #
 # --stress-fee doubles the fee to 0.2% as a crude slippage/fill-quality
 # proxy: freqtrade fills backtest orders at candle prices with no order-book
 # impact, so real fills are typically somewhat worse. The stress run bounds
 # how much of each result could be fee/fill luck.
+#
+# --strategy NAME (default StarterStrategy) selects the strategy class —
+# Phase 5b compares StarterStrategy vs StarterStrategyV2 on these exact
+# windows. Comparisons are only meaningful same-window same-data.
 #
 # Results land in user_data/backtest_results/backtest-result-<timestamp>.zip
 # (git-ignored); .last_result.json always points at the newest one. Copy or
@@ -22,30 +26,43 @@ set -eu
 cd "$(dirname "$0")/.."
 
 if [ $# -lt 1 ]; then
-  echo "usage: $0 <bear|sideways|bull|full> [--stress-fee]" >&2
+  echo "usage: $0 <bear|sideways|bull|full> [--stress-fee] [--strategy NAME]" >&2
   exit 2
 fi
 REGIME="$1"
 shift
 
+STRATEGY_NAME="StarterStrategy"
 STRESS_FEE=""
-if [ "${1:-}" = "--stress-fee" ]; then
-  STRESS_FEE="--fee 0.002"
-  shift
-fi
-if [ $# -gt 0 ]; then
-  echo "error: unexpected argument '$1'" >&2
-  exit 2
-fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --stress-fee)
+      STRESS_FEE="--fee 0.002"
+      shift
+      ;;
+    --strategy)
+      [ $# -ge 2 ] || { echo "error: --strategy requires a name" >&2; exit 2; }
+      STRATEGY_NAME="$2"
+      shift 2
+      ;;
+    *)
+      echo "error: unexpected argument '$1'" >&2
+      exit 2
+      ;;
+  esac
+done
 
 LABEL="$REGIME"
 if [ -n "$STRESS_FEE" ]; then
   LABEL="${REGIME}_fee_stress"
 fi
+if [ "$STRATEGY_NAME" != "StarterStrategy" ]; then
+  LABEL="${LABEL}_${STRATEGY_NAME}"
+fi
 
 TIMERANGE=$(python3 scripts/backtest_ranges.py timerange "$REGIME")
 
-echo "=== backtest $LABEL (timerange $TIMERANGE $STRESS_FEE) ==="
+echo "=== backtest $LABEL (timerange $TIMERANGE $STRESS_FEE strategy=$STRATEGY_NAME) ==="
 # $STRESS_FEE is intentionally unquoted: it is either empty or two words.
 # --userdir is explicit because freqtrade resolves the user-data dir from
 # CWD, not from the config path. --data-format-ohlcv json is explicit because
@@ -55,6 +72,7 @@ exec docker compose run --rm --entrypoint freqtrade freqtrade backtesting \
   --config /freqtrade/user_data/config-dryrun.json \
   --userdir /freqtrade/user_data \
   --data-format-ohlcv json \
+  --strategy "$STRATEGY_NAME" \
   --timerange "$TIMERANGE" \
   --export trades \
   $STRESS_FEE
