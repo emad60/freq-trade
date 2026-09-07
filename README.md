@@ -19,7 +19,7 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 3 — starter strategy
+## Status: Phase 4 — hardcoded risk limits
 
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
@@ -32,12 +32,37 @@ config `fee` is a **ratio**, not a percent).
 | 1 | Scaffolding & environment (Docker, .env, git) | ✅ done |
 | 2 | Exchange selection & config skeleton + dry-run safety gate | ✅ done |
 | 3 | Starter strategy — deterministic, no ML | ✅ done |
-| 4 | Hardcoded risk management layer (`risk_guard.py`) | ⬜ next |
-| 5 | Backtesting with realistic fees + slippage, 3 market regimes | ⬜ |
+| 4 | Hardcoded risk management layer (`risk_guard.py`) | ✅ done |
+| 5 | Backtesting with realistic fees + slippage, 3 market regimes | ⬜ next |
 | 6 | Dry-run (paper trading) setup — min 2–4 weeks | ⬜ |
 | 7 | Telegram monitoring & kill-switch | ⬜ |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
+
+## Hardcoded risk limits (Phase 4)
+
+`scripts/risk_guard.py` is the risk policy as code — deliberately **not**
+configurable (changing a limit is a reviewed commit, never a runtime tweak):
+
+| Limit | Value | Enforced |
+|---|---|---|
+| Per-trade stop-loss cap | 1.5% of entry | strategy static floor + tighten-only ratchet + `check_strategy` |
+| Max open trades | 2 | start-path config check |
+| Stake per trade | 5–8 USDT | start-path config check |
+| Tradable balance ratio | ≤ 1.0 | start-path config check |
+| Daily realized loss | ≤ 5% of wallet ($1) | `check-account` audit (Phase 6/7 consumers) |
+| Max portfolio drawdown | ≤ 15% from equity peak ($3) | `check-account` audit (Phase 6/7 consumers) |
+| Trading mode | spot only, long-only | start-path config check + `check_strategy` |
+
+Three enforcement surfaces: **start path** (`validate_config.py` refuses any
+config exceeding the caps before the bot starts), **strategy check**
+(`check_strategy` re-verifies strategy-declared attributes from outside the
+strategy class), and the **account audit** (`python3 scripts/risk_guard.py
+check-account --db <sqlite> --wallet 20` — read-only; freqtrade 2026.8
+removed config-level Protections and the strategy-class alternative would
+put risk enforcement *inside* strategy logic, so the runtime
+daily-loss/drawdown watchdog is owned by this module and lands with the
+dry-run watchdog (Phase 6) and Telegram kill-switch (Phase 7)).
 
 ## StarterStrategy (Phase 3)
 
@@ -105,8 +130,9 @@ user_data/            Freqtrade working dir (mounted into the container)
   backtest_results/   Backtest reports (git-ignored)
 tests/                pytest suite — config validation (Phase 2), strategy
                       signals & stop sizing (Phase 3); risk limits in Phase 4
-scripts/              validate_config.py now; risk_guard.py (Phase 4) and
-                      run_backtest.sh / run_dryrun.sh (Phases 5–6) as landed
+scripts/              validate_config.py (safety gate) + risk_guard.py
+                      (hardcoded risk limits, check-account audit);
+                      run_backtest.sh / run_dryrun.sh as later phases land
 docs/                 SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md (as phases land)
 ```
 
