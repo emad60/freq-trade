@@ -176,7 +176,7 @@ V2 full-sample exit breakdown:
    win +2.39% (15 wins) vs average loss −1.54% (38 losses) is a 1:1.55
    risk/reward, so breakeven needs a ~39% win rate; V2 delivers 28.3%.
    Per-trade expectancy is essentially unchanged: V1 −0.40%/trade,
-   V2 −0.43%/trade. H3 deliberately banks smaller wins — it shrank the
+   V2 −0.42%/trade. H3 deliberately banks smaller wins — it shrank the
    risk/reward — while H1/H2 removed roughly two thirds of the trades.
    The aggregate bleed shrank because there are fewer trades to bleed on.
 3. **The sideways +0.40% is 4 trades.** Noise. Do not read a regime

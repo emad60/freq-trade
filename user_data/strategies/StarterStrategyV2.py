@@ -89,9 +89,10 @@ class StarterStrategyV2(StarterStrategy):
         EMA(200)) PLUS H3: RSI(14) crossing down through RSI_FADING_EXIT.
 
         Same tag-precedence convention as V1 — when several exits fire on the
-        same candle the tag assigned LAST wins: trend invalidation (the most
-        fundamental reason), then the V1 overbought exit, then the new
-        momentum-fade tag. Exit effects are identical; the tag is bookkeeping.
+        same candle, the tag assigned LAST wins: the fading tag is assigned
+        first, the V1 overbought tag after it, and the trend-invalidation tag
+        (the most fundamental reason) last of all. Exit effects are identical;
+        the tag is bookkeeping.
         """
         fading_exit = crossed_below(dataframe["rsi"], RSI_FADING_EXIT)
         rsi_exit = crossed_below(dataframe["rsi"], RSI_OVERBOUGHT)

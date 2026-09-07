@@ -62,13 +62,16 @@ configurable (changing a limit is a reviewed commit, never a runtime tweak):
 | Tradable balance ratio | ≤ 1.0 | start-path config check |
 | Daily realized loss | ≤ 5% of wallet ($1) | `check-account` audit (Phase 6/7 consumers) |
 | Max portfolio drawdown | ≤ 15% from equity peak ($3) | `check-account` audit (Phase 6/7 consumers) |
+| Dry-run wallet base | exactly 20 USDT (`DRY_RUN_WALLET`) | start-path config check + watchdog audit refuses any other base — the two ratio caps above multiply it |
 | Trading mode | spot only, long-only | start-path config check + `check_strategy` |
 
 Three enforcement surfaces: **start path** (`validate_config.py` refuses any
-config exceeding the caps — or *omitting* them, fail-closed — and refuses any
-`FREQTRADE__*` env override of a gate/risk key, closing the `.env` bypass),
+config exceeding the caps — or *omitting* them, fail-closed — refuses any
+`FREQTRADE__*` env override of a gate/risk key, closing the `.env` bypass,
+and runs `check_strategy` against the configured strategy class),
 **strategy check** (`check_strategy` re-verifies strategy-declared attributes
-from outside the strategy class), and the **account audit**
+from outside the strategy class — test suite AND start path), and the
+**account audit**
 (`python3 scripts/risk_guard.py check-account --db <sqlite> --wallet 20` —
 read-only; freqtrade 2026.8 removed config-level Protections and the
 strategy-class alternative would put risk enforcement *inside* strategy

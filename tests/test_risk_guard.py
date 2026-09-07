@@ -174,6 +174,33 @@ class TestCheckConfig:
         problems = risk_guard.check_config(config)
         assert len(problems) >= 3
 
+    def test_wallet_matching_the_pinned_base_passes(self):
+        assert risk_guard.check_config(make_config()) == []
+
+    def test_inflated_wallet_refused(self):
+        # The daily-loss ($1) and drawdown ($3) caps are ratios of the
+        # wallet: config wallet=1000 would silently make them $50/$150.
+        problems = risk_guard.check_config(
+            make_config(dry_run_wallet=1000))
+        assert any("DRY_RUN_WALLET" in p for p in problems)
+
+    def test_shrunk_wallet_refused_too(self):
+        problems = risk_guard.check_config(make_config(dry_run_wallet=5))
+        assert any("DRY_RUN_WALLET" in p for p in problems)
+
+    def test_missing_wallet_in_dry_run_refused_fail_closed(self):
+        problems = risk_guard.check_config(
+            {k: v for k, v in make_config().items() if k != "dry_run_wallet"})
+        assert any("dry_run_wallet" in p and "required" in p for p in problems)
+
+    def test_live_config_does_not_require_dry_run_wallet(self):
+        # Phase 9's live config has no dry_run_wallet — the dry-run pin
+        # must not leak into the live path.
+        config = {k: v for k, v in make_config().items()
+                  if k not in ("dry_run_wallet", "dry_run")}
+        problems = risk_guard.check_config(config)
+        assert not any("dry_run_wallet" in p for p in problems)
+
 
 # --------------------------------------------------------------------------
 # check_strategy — the cap re-enforced outside the strategy class

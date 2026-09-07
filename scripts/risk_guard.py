@@ -64,6 +64,14 @@ DAILY_LOSS_LIMIT_RATIO = 0.05
 # Maximum portfolio drawdown from the equity peak (0.15 x 20 USDT = $3).
 MAX_DRAWDOWN_RATIO = 0.15
 
+# The dry-run wallet — the baseline the ratio caps (daily loss, drawdown)
+# multiply. Hardcoded, because a ratio limit is only as strong as the base
+# it is a ratio OF: a config free to say dry_run_wallet=1000 would turn the
+# $1/day and $3 drawdown caps into $50/$150 without touching any other
+# number. The start gate refuses a config whose dry_run_wallet differs, and
+# the watchdog refuses to audit against any other base.
+DRY_RUN_WALLET = 20.0
+
 # Tolerance for floating-point threshold comparisons ("at the limit" counts
 # as a breach — the caps are inclusive).
 _EPSILON = 1e-9
@@ -181,14 +189,30 @@ def check_config(config: dict) -> list[str]:
         )
 
     # Sizing must fit inside the wallet (dry-run: the wallet is known).
+    # In dry-run the wallet is also the RISK BASE: DAILY_LOSS_LIMIT_RATIO and
+    # MAX_DRAWDOWN_RATIO multiply it, so its value is a hardcoded limit like
+    # the ratios — a config may not move the absolute caps by editing it.
     wallet_raw = config.get("dry_run_wallet")
     wallet = _num(wallet_raw) if config.get("dry_run") is True else None
-    if config.get("dry_run") is True and wallet_raw is not None and wallet is None:
-        # Non-finite wallets (Python's json parses NaN) make the sizing
-        # check meaningless — refuse rather than silently skip it.
-        problems.append(
-            f"'dry_run_wallet' must be a positive finite number; got {wallet_raw!r}"
-        )
+    if config.get("dry_run") is True:
+        if wallet_raw is None:
+            problems.append(
+                "'dry_run_wallet' is required in dry-run mode — the daily-loss "
+                "and drawdown caps are ratios of it; omission is refused (fail-closed)"
+            )
+        elif wallet is None:
+            # Non-finite wallets (Python's json parses NaN) make the sizing
+            # check meaningless — refuse rather than silently skip it.
+            problems.append(
+                f"'dry_run_wallet' must be a positive finite number; got {wallet_raw!r}"
+            )
+        elif abs(wallet - DRY_RUN_WALLET) > _EPSILON:
+            problems.append(
+                f"'dry_run_wallet' must equal the hardcoded DRY_RUN_WALLET "
+                f"({DRY_RUN_WALLET}) — the daily-loss/drawdown caps are ratios "
+                f"of the wallet, so any other value silently changes the "
+                f"absolute limits; got {wallet_raw}"
+            )
     if max_open_ok and stake_ok and wallet is not None:
         eff_ratio = _num(ratio)
         if eff_ratio is None:

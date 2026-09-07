@@ -17,10 +17,18 @@ Checks performed per config file:
   * risk limits (Phase 4, scripts/risk_guard.py): spot-only trading and
     position sizing caps (max_open_trades, stake bounds, wallet fit), all
     hardcoded, none config-overridable. Fail-closed: a config OMITTING
-    trading_mode / max_open_trades / stake_amount is refused too — the caps
-    cannot be enforced on defaults. (Runtime drawdown/daily-loss enforcement
-    lives in risk_guard.evaluate_account / check-account, NOT here — see the
-    NOTE in risk_guard.py.)
+    trading_mode / max_open_trades / stake_amount / dry_run_wallet is
+    refused too — the caps cannot be enforced on defaults, and the wallet
+    is pinned to risk_guard.DRY_RUN_WALLET because the daily-loss and
+    drawdown caps are RATIOS of it. (Runtime drawdown/daily-loss enforcement
+    lives in risk_guard.evaluate_account / check-account + the watchdog,
+    NOT here — see the NOTE in risk_guard.py.)
+  * strategy risk check (risk_guard.check_strategy) run against the class
+    named by config["strategy"], resolved from the strategies dir beside the
+    config — the same check the test suite pins, now on the start path, so
+    a strategy edit loosening the stop-loss floor cannot start the bot
+    (skipped with a note only where freqtrade/the strategies dir is absent,
+    i.e. host-side test runs; freqtrade itself could not start then either)
   * structural sanity: exchange.name, non-empty pair_whitelist, stake_currency,
     positive dry_run_wallet in dry-run mode
   * fee is a RATIO in [0, 0.02] — freqtrade's config `fee` is a ratio
@@ -48,10 +56,12 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import os
 import sys
+from pathlib import Path
 
 # risk_guard.py lives beside this script; running as `python3 .../validate_config.py`
 # puts the script's directory on sys.path, so the import works on the compose
@@ -218,6 +228,46 @@ def check_env_overrides(env: dict[str, str]) -> list[str]:
     return problems
 
 
+def check_strategy_on_start_path(config: dict, config_path: str) -> list[str]:
+    """Run risk_guard.check_strategy against the configured strategy class.
+
+    The class is resolved from ``<config dir>/strategies/<name>.py`` — the
+    same place freqtrade resolves it for this config. A strategy file that
+    cannot be imported, does not define its class, or declares a risk
+    attribute beyond the hardcoded caps (stop-loss floor, shorting, mode)
+    refuses the start. Skipped with a note when there is no strategies dir
+    beside the config or freqtrade is not importable — those layouts cannot
+    start a bot anyway (freqtrade's own strategy resolution would fail),
+    and they are exactly the host-side unit-test runs.
+    """
+    strategies_dir = Path(config_path).resolve().parent / "strategies"
+    if not strategies_dir.is_dir():
+        print(f"note: no strategies dir at {strategies_dir} — strategy risk "
+              "check skipped", file=sys.stderr)
+        return []
+    name = config.get("strategy")
+    if not isinstance(name, str) or not name:
+        return ["'strategy' must name the strategy class for the hardcoded "
+                "strategy risk check (fail-closed)"]
+    if str(strategies_dir) not in sys.path:
+        sys.path.insert(0, str(strategies_dir))
+    try:
+        import freqtrade  # noqa: F401
+    except ModuleNotFoundError:
+        print("note: freqtrade not importable — strategy risk check skipped "
+              "(host run)", file=sys.stderr)
+        return []
+    try:
+        module = importlib.import_module(name)
+    except Exception as e:  # a broken strategy file must not start the bot
+        return [f"cannot import strategy '{name}' from {strategies_dir}: "
+                f"{type(e).__name__}: {e}"]
+    cls = getattr(module, name, None)
+    if cls is None:
+        return [f"strategy module '{name}' does not define class '{name}'"]
+    return risk_guard.check_strategy(cls)
+
+
 def validate(path: str, confirm_env: str | None) -> tuple[bool, list[str], dict]:
     """Validate one config. Returns (passed, problems, loaded_config).
 
@@ -230,6 +280,7 @@ def validate(path: str, confirm_env: str | None) -> tuple[bool, list[str], dict]
     problems = (
         check_structure(config)
         + risk_guard.check_config(config)
+        + check_strategy_on_start_path(config, path)
         + check_dry_run_gate(config, confirm_env)
     )
     return not problems, problems, config

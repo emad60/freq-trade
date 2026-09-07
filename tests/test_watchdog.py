@@ -8,7 +8,10 @@ stub HTTP server that records the requests it receives.
 
 import base64
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,6 +63,11 @@ class RecordingStop:
         return True, '{"status": "stopping"}'
 
 
+def recording_ping(api_url, timeout=5.0):
+    """ping_fn stand-in: the bot is alive."""
+    return True
+
+
 # ---------------------------------------------------------------------------
 # risk_guard.read_trades — the read-only DB access both consumers share
 # ---------------------------------------------------------------------------
@@ -97,6 +105,13 @@ class TestReadTrades:
         risk_guard.read_trades(str(tmp_path / "t.sqlite"))
         assert not list(tmp_path.glob("*-wal"))
         assert not list(tmp_path.glob("*-shm"))
+
+    def test_connection_uri_pins_read_only_mode(self):
+        """Behavioral tests above would pass even with mode=rwc (nothing
+        writes through the connection); this pins the guarantee itself."""
+        import inspect
+        source = inspect.getsource(risk_guard.read_trades)
+        assert "mode=ro" in source
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +193,7 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=str(tmp_path / "nope.sqlite"),
             config_path=make_config(tmp_path / "c.json"),
-            api_url="http://unused", stop_fn=stop)
+            api_url="http://unused", stop_fn=stop, ping_fn=recording_ping)
         assert status == "idle"
         assert stop.calls == []
 
@@ -187,7 +202,7 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
             config_path=make_config(tmp_path / "c.json"),
-            api_url="http://unused", stop_fn=stop)
+            api_url="http://unused", stop_fn=stop, ping_fn=recording_ping)
         assert status == "ok"
         assert stop.calls == []
 
@@ -196,7 +211,7 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=make_db(tmp_path / "db.sqlite", [BREACH_ROW]),
             config_path=make_config(tmp_path / "c.json"),
-            api_url="http://bot:8080", stop_fn=stop)
+            api_url="http://bot:8080", stop_fn=stop, ping_fn=recording_ping)
         assert status == "stopped"
         assert stop.calls == [("http://bot:8080", "user", "pass")]
 
@@ -207,7 +222,7 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=make_db(tmp_path / "db.sqlite", [BREACH_ROW]),
             config_path=make_config(tmp_path / "c.json"),
-            api_url="http://bot:8080", stop_fn=stop)
+            api_url="http://bot:8080", stop_fn=stop, ping_fn=recording_ping)
         assert status == "stopped-no-credentials"
         assert stop.calls == []
 
@@ -218,7 +233,7 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=str(bad_db),
             config_path=make_config(tmp_path / "c.json"),
-            api_url="http://unused", stop_fn=stop)
+            api_url="http://unused", stop_fn=stop, ping_fn=recording_ping)
         assert status == "error"
         assert stop.calls == []
 
@@ -228,9 +243,55 @@ class TestRunOnce:
         cfg.write_text(json.dumps({"dry_run": True}))
         status = watchdog.run_once(
             NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
-            config_path=str(cfg), api_url="http://unused", stop_fn=stop)
+            config_path=str(cfg), api_url="http://unused", stop_fn=stop,
+            ping_fn=recording_ping)
         assert status == "error"
         assert stop.calls == []
+
+    @pytest.mark.parametrize("wallet", [1000, 0])
+    def test_wallet_other_than_pinned_base_is_error_not_breach(self, tmp_path, wallet):
+        """The caps are ratios of the wallet; auditing against an unpinned
+        base would silently move the absolute limits. Refuse (error cycle),
+        never stop on it."""
+        stop = RecordingStop()
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json", wallet=wallet),
+            api_url="http://unused", stop_fn=stop, ping_fn=recording_ping)
+        assert status == "error"
+        assert stop.calls == []
+
+    def test_broken_json_config_is_error_not_breach(self, tmp_path):
+        """A config typo (JSON decode error) must degrade to a loud error
+        cycle, not crash the loop into permanent watchdog silence."""
+        stop = RecordingStop()
+        cfg = tmp_path / "c.json"
+        cfg.write_text('{"dry_run_wallet": 20.0, oops}')
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=str(cfg), api_url="http://unused", stop_fn=stop,
+            ping_fn=recording_ping)
+        assert status == "error"
+        assert stop.calls == []
+
+    def test_unreachable_bot_warns_but_audit_still_ok(self, tmp_path, capsys):
+        stop = RecordingStop()
+        status = watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=stop, ping_fn=lambda url, timeout=5.0: False)
+        assert status == "ok"  # account within limits — liveness is a warning
+        assert stop.calls == []
+        assert "WARNING" in capsys.readouterr().out
+
+    def test_ping_receives_the_configured_api_url(self, tmp_path):
+        seen = []
+        watchdog.run_once(
+            NOW, db_path=make_db(tmp_path / "db.sqlite", CLEAN_ROWS),
+            config_path=make_config(tmp_path / "c.json"),
+            api_url="http://bot:8080", stop_fn=RecordingStop(),
+            ping_fn=lambda url, timeout=5.0: seen.append(url) or True)
+        assert seen == ["http://bot:8080"]
 
     def test_breach_reaches_the_real_rest_api(self, tmp_path, stub_api, creds):
         """Wiring test: with the real stop_bot, a breach produces a POST to
@@ -238,7 +299,8 @@ class TestRunOnce:
         status = watchdog.run_once(
             NOW, db_path=make_db(tmp_path / "db.sqlite", [BREACH_ROW]),
             config_path=make_config(tmp_path / "c.json"),
-            api_url=stub_api.url, stop_fn=watchdog.stop_bot)
+            api_url=stub_api.url, stop_fn=watchdog.stop_bot,
+            ping_fn=recording_ping)
         assert status == "stopped"
         assert stub_api.requests[0][:2] == ("POST", "/api/v1/stop")
 
@@ -260,3 +322,33 @@ class TestMainOnce:
     def test_error_exits_one(self, monkeypatch):
         monkeypatch.setattr(watchdog, "run_once", lambda *a, **k: "error")
         assert watchdog.main(["--once"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Operational knob: WATCHDOG_INTERVAL_SECONDS fails fast with a clear
+# message (it is parsed before main() in a restart-on-failure container)
+# ---------------------------------------------------------------------------
+
+class TestIntervalParsing:
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("abc", "must be an integer"), ("-5", ">= 30"), ("0", ">= 30")],
+    )
+    def test_bad_interval_fails_fast_with_message(self, tmp_path, raw, message):
+        env = dict(os.environ, WATCHDOG_INTERVAL_SECONDS=raw)
+        proc = subprocess.run(
+            [sys.executable, str(watchdog.__file__), "--once"],
+            capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode != 0
+        assert message in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_valid_interval_starts(self, tmp_path):
+        env = dict(os.environ, WATCHDOG_INTERVAL_SECONDS="60")
+        proc = subprocess.run(
+            [sys.executable, str(watchdog.__file__), "--once"],
+            capture_output=True, text=True, env=env,
+        )
+        # On the host the default DB path doesn't exist -> 'idle' -> exit 0.
+        assert proc.returncode == 0, proc.stderr

@@ -1,7 +1,9 @@
 #!/bin/sh
 # Run the read-only Phase 4 risk audit (risk_guard check-account) against
 # the dry-run trade DB, with the wallet taken from THE gated config.
-# Exit codes: 0 within limits, 1 BREACH, 2 error (never a breach).
+# Exit codes on the main path: 0 within limits, 1 BREACH, 2 error (never a
+# breach). Docker/compose infra failures exit with the runner's own code —
+# treat ANY nonzero exit as "investigate", never as "fine".
 set -eu
 cd "$(dirname "$0")/.."
 
