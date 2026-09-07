@@ -331,6 +331,21 @@ def evaluate_account(trades: list[dict], wallet_start: float, now: datetime) -> 
 # CLI — `check-config` and `check-account`
 # ---------------------------------------------------------------------------
 
+def read_trades(db_path: str) -> list[dict]:
+    """Read freqtrade's trades table READ-ONLY (mode=ro URI). Raises
+    sqlite3.Error if the file or table is missing/unreadable. Shared by the
+    check-account CLI and the dry-run watchdog."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT is_open, stake_amount, close_profit_abs, close_date FROM trades"
+        ).fetchall()
+    finally:
+        conn.close()
+    columns = ("is_open", "stake_amount", "close_profit_abs", "close_date")
+    return [dict(zip(columns, row)) for row in rows]
+
+
 def cmd_check_config(args: argparse.Namespace) -> int:
     """Validate config file(s) against the hardcoded risk limits."""
     import json
@@ -365,22 +380,11 @@ def cmd_check_config(args: argparse.Namespace) -> int:
 def cmd_check_account(args: argparse.Namespace) -> int:
     """Audit a freqtrade trade database (read-only) against the caps."""
     try:
-        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-    except sqlite3.Error as e:
-        print(f"ERROR: cannot open database {args.db}: {e}", file=sys.stderr)
-        return 2
-    try:
-        rows = conn.execute(
-            "SELECT is_open, stake_amount, close_profit_abs, close_date FROM trades"
-        ).fetchall()
+        trades = read_trades(args.db)
     except sqlite3.Error as e:
         print(f"ERROR: cannot read trades from {args.db}: {e}", file=sys.stderr)
         return 2
-    finally:
-        conn.close()
 
-    columns = ("is_open", "stake_amount", "close_profit_abs", "close_date")
-    trades = [dict(zip(columns, row)) for row in rows]
     try:
         report = evaluate_account(trades, args.wallet, datetime.now(timezone.utc))
     except ValueError as e:

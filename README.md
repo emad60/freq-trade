@@ -19,15 +19,15 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 5 — backtested across 3 market regimes
+## Status: Phase 6 — dry-run started (paper trading)
 
-Phase 5 verdict (honest, see `docs/BACKTEST_RESULTS.md`): the risk
-containment works — every loss bounded at the Phase 4 caps, bear-market
-2022 cost $0.65 of a 20 USDT wallet while BTC fell 64.5% — but the starter
-strategy has **no edge**: it lost in all four samples including the bull
-market (−24.5% over 5.3 years, 19.4% win rate). Decision pending: dry-run
-the current version while iterating the strategy offline. Live remains
-gated regardless.
+The dry-run clock started **2026-09-07**; the go-live gate is a minimum
+**2–4 weeks** of unattended dry-run (Phase 9 can never open before
+~2026-09-21, and only then via the manual checklist). Option (c) is in
+flight: the runtime stack validates against real market data while the
+strategy is iterated offline in parallel (`docs/BACKTEST_RESULTS.md`
+holds the Phase 5 verdict: containment works, the starter strategy has no
+edge — live stays gated regardless).
 
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
@@ -42,7 +42,7 @@ config `fee` is a **ratio**, not a percent).
 | 3 | Starter strategy — deterministic, no ML | ✅ done |
 | 4 | Hardcoded risk management layer (`risk_guard.py`) | ✅ done |
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ✅ done |
-| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ⬜ next |
+| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ started 2026-09-07 (clock ends ~09-21 at the earliest) |
 | 7 | Telegram monitoring & kill-switch | ⬜ |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
@@ -71,8 +71,37 @@ from outside the strategy class), and the **account audit**
 read-only; freqtrade 2026.8 removed config-level Protections and the
 strategy-class alternative would put risk enforcement *inside* strategy
 logic, so the runtime daily-loss/drawdown watchdog is owned by this module
-and lands with the dry-run watchdog (Phase 6) and Telegram kill-switch
-(Phase 7)).
+and consumed by the dry-run watchdog container (Phase 6) and the Telegram
+kill-switch (Phase 7)).
+
+## Dry-run (Phase 6)
+
+```bash
+docker compose up -d          # starts freqtrade AND the watchdog
+docker compose logs -f freqtrade
+docker compose logs -f watchdog
+scripts/check_account.sh      # manual read-only risk audit of the dry-run DB
+```
+
+Two containers, one job each:
+
+- **`freqtrade`** — the bot. Every start re-runs `validate_config.py`
+  (safety gate) before `freqtrade trade` via the sh -c entrypoint; DB at
+  `user_data/tradesv3.dryrun.sqlite`; REST API/FreqUI published to
+  **127.0.0.1 only**.
+- **`watchdog`** — runtime risk enforcement. Every 5 min it re-reads the
+  trade DB **read-only**, re-evaluates the *same hardcoded caps* via
+  `risk_guard.evaluate_account` (daily loss ≤ $1, drawdown ≤ 15%, exposure
+  ≤ 2 × 8 USDT), and on breach POSTs `/api/v1/stop` (basic auth,
+  credentials from `.env`). `/stop` halts all trading but leaves the
+  container up so breaches stay visible in the logs; the operator reviews
+  and restarts manually. If the DB is missing/unreadable it logs loudly
+  and retries — a broken audit is never silently treated as "within
+  limits", and it never calls `/stop` on an error (only on a real breach).
+
+Stopping the bot deliberately does NOT close positions (freqtrade semantics);
+positions keep being managed while entries stop. Full exit is
+`docker compose stop` (operator action, not automatic).
 
 ## StarterStrategy (Phase 3)
 
@@ -142,7 +171,8 @@ tests/                pytest suite — config validation (Phase 2), strategy
                       signals & stop sizing (Phase 3); risk limits in Phase 4
 scripts/              validate_config.py (safety gate) + risk_guard.py
                       (hardcoded risk limits, check-account audit) +
-                      backtest_ranges.py / run_backtest.sh (Phase 5 harness)
+                      backtest_ranges.py / run_backtest.sh (Phase 5 harness);
+                      watchdog.py + check_account.sh (Phase 6 runtime audit)
 docs/                 BACKTEST_RESULTS.md (Phase 5, honest per-regime
                       results); SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md
                       as later phases land

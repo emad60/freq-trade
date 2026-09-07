@@ -37,3 +37,23 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - python3 /freqtrade/scripts/validate_config.py /freqtrade/user_data/config-dryrun.json && exec freqtrade trade --config /freqtrade/user_data/config-dryrun.json --db-url sqlite:////freqtrade/user_data/tradesv3.dryrun.sqlite --logfile /freqtrade/user_data/logs/freqtrade.log
+
+  # Runtime risk enforcement (Phase 6): audits the trade DB read-only every
+  # cycle against risk_guard's hardcoded caps and POSTs /api/v1/stop on
+  # breach. The API URL targets the compose network (the bot's port is
+  # published to 127.0.0.1 on the host only). Credentials come from .env
+  # via env_file — same as the bot's.
+  watchdog:
+    image: freqtradeorg/freqtrade:stable
+    container_name: freqtrade-watchdog
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - freqtrade
+    environment:
+      WATCHDOG_API_URL: http://freqtrade:8080
+    volumes:
+      - ./user_data:/freqtrade/user_data
+      - ./scripts:/freqtrade/scripts:ro
+    entrypoint: ["python3", "/freqtrade/scripts/watchdog.py"]
