@@ -19,7 +19,15 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 4 — hardcoded risk limits
+## Status: Phase 5 — backtested across 3 market regimes
+
+Phase 5 verdict (honest, see `docs/BACKTEST_RESULTS.md`): the risk
+containment works — every loss bounded at the Phase 4 caps, bear-market
+2022 cost $0.65 of a 20 USDT wallet while BTC fell 64.5% — but the starter
+strategy has **no edge**: it lost in all four samples including the bull
+market (−24.5% over 5.3 years, 19.4% win rate). Decision pending: dry-run
+the current version while iterating the strategy offline. Live remains
+gated regardless.
 
 Confirmed decisions (Phase 2): **Binance · USDT · BTC/ETH/SOL · $20 paper wallet**
 (dry-run balance deliberately mirrors the real Binance balance for honest sizing
@@ -33,8 +41,8 @@ config `fee` is a **ratio**, not a percent).
 | 2 | Exchange selection & config skeleton + dry-run safety gate | ✅ done |
 | 3 | Starter strategy — deterministic, no ML | ✅ done |
 | 4 | Hardcoded risk management layer (`risk_guard.py`) | ✅ done |
-| 5 | Backtesting with realistic fees + slippage, 3 market regimes | ⬜ next |
-| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ⬜ |
+| 5 | Backtesting with realistic fees + slippage, 3 market regimes | ✅ done |
+| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ⬜ next |
 | 7 | Telegram monitoring & kill-switch | ⬜ |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
@@ -133,9 +141,11 @@ user_data/            Freqtrade working dir (mounted into the container)
 tests/                pytest suite — config validation (Phase 2), strategy
                       signals & stop sizing (Phase 3); risk limits in Phase 4
 scripts/              validate_config.py (safety gate) + risk_guard.py
-                      (hardcoded risk limits, check-account audit);
-                      run_backtest.sh / run_dryrun.sh as later phases land
-docs/                 SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md (as phases land)
+                      (hardcoded risk limits, check-account audit) +
+                      backtest_ranges.py / run_backtest.sh (Phase 5 harness)
+docs/                 BACKTEST_RESULTS.md (Phase 5, honest per-regime
+                      results); SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md
+                      as later phases land
 ```
 
 ## Documentation
@@ -143,4 +153,5 @@ docs/                 SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md (as phases l
 - `docs/SETUP.md` — detailed setup walkthrough (Phase 8)
 - `docs/RISK_POLICY.md` — every hardcoded limit, rationale, and change policy (Phase 8)
 - `docs/GOLIVE_CHECKLIST.md` — the manual gate before live trading ever starts (Phase 8/9)
-- `docs/BACKTEST_RESULTS.md` — honest per-regime backtest results (Phase 5)
+- `docs/BACKTEST_RESULTS.md` — honest per-regime backtest results (Phase 5):
+  regime windows, fill assumptions, results, and the no-edge verdict
