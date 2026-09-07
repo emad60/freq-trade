@@ -31,7 +31,8 @@ tests, and were verified against the downloaded data before running:
 
 Every window sits inside the downloaded data plus the strategy's 200-candle
 startup buffer (enforced by `backtest_ranges.py`, so a window the data
-cannot serve is refused rather than silently shifted). Binance spot min
+cannot serve is refused rather than silently shifted). "BTC move" is close
+of the window's first candle → close of the last candle. Binance spot min
 notional is 5 USDT on all three pairs — the 8 USDT stake trades everywhere.
 
 ## Fill assumptions (from freqtrade 2026.8 source, not folklore)
@@ -73,9 +74,10 @@ Per-pair (full sample): BTC 58 trades −$1.58, ETH 61 −$1.23, SOL 36 −$2.09
 
 ## Reading the numbers honestly
 
-1. **No edge, in any regime.** A 19.4% win rate with roughly 1:3.2
-   risk/reward (avg win +5%, avg loss −1.6% incl. fees) needs ~24%+ winners
-   to break even; the strategy delivers 19.4% — and 10% in the bull market,
+1. **No edge, in any regime.** The winners average +4.24% (20 `roi` at
+   +5.00% but 10 `rsi_overbought` at only +2.73%) against −1.52% average
+   losses (incl. fees) — roughly 1:2.8 risk/reward, so breakeven needs a
+   ~26% win rate. The strategy delivers 19.4% — and 10% in the bull market,
    where the EMA(200) regime filter was satisfied almost the whole time and
    RSI-30 dips kept getting bought into further weakness.
 2. **The risk containment did exactly what Phase 4 designed it to do.**
