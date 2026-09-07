@@ -14,9 +14,13 @@ docs/GOLIVE_CHECKLIST.md must also be completed (Phase 8/9).
 
 Checks performed per config file:
   * dry_run is an explicit boolean; false requires the exact confirmation env var
-  * risk limits (Phase 4, scripts/risk_guard.py): spot-only trading, position
-    sizing caps (max_open_trades, stake bounds, wallet fit), and mandatory
-    runtime drawdown protection — all hardcoded, none config-overridable
+  * risk limits (Phase 4, scripts/risk_guard.py): spot-only trading and
+    position sizing caps (max_open_trades, stake bounds, wallet fit), all
+    hardcoded, none config-overridable. Fail-closed: a config OMITTING
+    trading_mode / max_open_trades / stake_amount is refused too — the caps
+    cannot be enforced on defaults. (Runtime drawdown/daily-loss enforcement
+    lives in risk_guard.evaluate_account / check-account, NOT here — see the
+    NOTE in risk_guard.py.)
   * structural sanity: exchange.name, non-empty pair_whitelist, stake_currency,
     positive dry_run_wallet in dry-run mode
   * fee is a RATIO in [0, 0.02] — freqtrade's config `fee` is a ratio
@@ -25,10 +29,19 @@ Checks performed per config file:
     least 32 chars (freqtrade's own schema minimum — short values crash
     `docker compose up` on the .env path)
 
+Checks performed on the environment (once per run):
+  * any FREQTRADE__* variable overriding a gate/risk key (dry_run,
+    trading_mode, margin_mode, max_open_trades, stake_amount,
+    tradable_balance_ratio, dry_run_wallet) is refused — this process runs
+    inside the container with .env already loaded, so the check sees exactly
+    what freqtrade will; without it a one-line .env edit would silently
+    bypass every file-based check above
+
 Exit codes:
     0  all configs passed
     1  refused (dry_run: false without explicit confirmation, risk-limit
-       violation, or structural problem in a config)
+       violation, structural problem, or a FREQTRADE__* env override of a
+       protected key)
     2  usage / missing file / unreadable file / JSON parse error
 """
 
@@ -64,6 +77,22 @@ API_SECRET_MIN_LENGTH = 32
 REQUIRED_NON_EMPTY = {
     "stake_currency": "stake currency (e.g. USDT) must be set",
 }
+
+# FREQTRADE__* environment variables whose target key would weaken the
+# dry-run gate or the hardcoded risk limits. Matched on the first path
+# segment (FREQTRADE__<SEGMENT>[__...]): FREQTRADE__DRY_RUN=false and a
+# hypothetical FREQTRADE__STAKE_AMOUNT__X both hit their protected key.
+# Everything else (exchange keys, api_server secrets, telegram) stays a
+# legitimate override — that is the documented secrets-injection mechanism.
+PROTECTED_ENV_KEYS = (
+    "dry_run",
+    "trading_mode",
+    "margin_mode",
+    "max_open_trades",
+    "stake_amount",
+    "tradable_balance_ratio",
+    "dry_run_wallet",
+)
 
 
 class ConfigFileError(ValueError):
@@ -166,6 +195,29 @@ def check_structure(config: dict) -> list[str]:
     return problems
 
 
+def check_env_overrides(env: dict[str, str]) -> list[str]:
+    """Refuse FREQTRADE__* overrides of gate/risk keys. Returns problems.
+
+    The gate validates the config FILE, but the bot runs with env-overridden
+    values (compose env_file: .env). Without this check, FREQTRADE__DRY_RUN=false
+    or FREQTRADE__STAKE_AMOUNT=50 in .env would sail through the gate with
+    'OK' and take effect at runtime — while the equivalent JSON edit is refused.
+    """
+    problems: list[str] = []
+    for name in sorted(env):
+        if not name.startswith("FREQTRADE__"):
+            continue
+        target = name[len("FREQTRADE__"):].lower().split("__")[0]
+        if target in PROTECTED_ENV_KEYS:
+            problems.append(
+                f"environment override '{name}' targets protected key "
+                f"'{target}' — FREQTRADE__* variables must not set the "
+                f"dry-run gate or risk-limit keys; remove it from .env / "
+                f"the environment (limits change only via code commits)"
+            )
+    return problems
+
+
 def validate(path: str, confirm_env: str | None) -> tuple[bool, list[str], dict]:
     """Validate one config. Returns (passed, problems, loaded_config).
 
@@ -192,6 +244,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     confirm_env = os.environ.get(CONFIRM_ENV_VAR)
+
+    # Environment overrides first: a protected-key FREQTRADE__* var poisons
+    # the whole run — the bot would execute values the file-based checks
+    # below never saw. Same refusal class as a gate violation (exit 1).
+    env_problems = check_env_overrides(os.environ)
+    if env_problems:
+        print("REFUSED: FREQTRADE__* environment override(s) of protected key(s)",
+              file=sys.stderr)
+        for problem in env_problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
 
     gate_refused = False
     file_error = False

@@ -55,14 +55,16 @@ configurable (changing a limit is a reviewed commit, never a runtime tweak):
 | Trading mode | spot only, long-only | start-path config check + `check_strategy` |
 
 Three enforcement surfaces: **start path** (`validate_config.py` refuses any
-config exceeding the caps before the bot starts), **strategy check**
-(`check_strategy` re-verifies strategy-declared attributes from outside the
-strategy class), and the **account audit** (`python3 scripts/risk_guard.py
-check-account --db <sqlite> --wallet 20` — read-only; freqtrade 2026.8
-removed config-level Protections and the strategy-class alternative would
-put risk enforcement *inside* strategy logic, so the runtime
-daily-loss/drawdown watchdog is owned by this module and lands with the
-dry-run watchdog (Phase 6) and Telegram kill-switch (Phase 7)).
+config exceeding the caps — or *omitting* them, fail-closed — and refuses any
+`FREQTRADE__*` env override of a gate/risk key, closing the `.env` bypass),
+**strategy check** (`check_strategy` re-verifies strategy-declared attributes
+from outside the strategy class), and the **account audit**
+(`python3 scripts/risk_guard.py check-account --db <sqlite> --wallet 20` —
+read-only; freqtrade 2026.8 removed config-level Protections and the
+strategy-class alternative would put risk enforcement *inside* strategy
+logic, so the runtime daily-loss/drawdown watchdog is owned by this module
+and lands with the dry-run watchdog (Phase 6) and Telegram kill-switch
+(Phase 7)).
 
 ## StarterStrategy (Phase 3)
 

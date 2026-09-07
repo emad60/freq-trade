@@ -11,9 +11,9 @@ hot-reload, or any future ML component.
 Enforcement surfaces:
 
 1. **Start path** — ``validate_config.py`` calls :func:`check_config` on
-   every ``docker compose up`` before the bot starts. A config whose
-   position sizing or trading mode exceeds the caps below cannot start the
-   bot at all.
+   every ``docker compose up`` before the bot starts. A config that omits
+   the risk keys or exceeds the caps below cannot start the bot at all
+   (fail-closed: the caps mean nothing if they can be made to disappear).
 2. **Account audit** — :func:`evaluate_account` (and the ``check-account``
    CLI, reading freqtrade's trade database read-only) evaluates realized
    daily loss, portfolio drawdown and open exposure against the caps. The
@@ -111,11 +111,13 @@ def check_config(config: dict) -> list[str]:
     problems: list[str] = []
 
     # Spot only — margin, futures and leverage are prohibited in v1.
+    # trading_mode is REQUIRED (fail-closed): a config omitting it would
+    # start the bot on freqtrade's default rather than a reviewed posture.
     trading_mode = config.get("trading_mode")
-    if trading_mode is not None and trading_mode != "spot":
+    if trading_mode != "spot":
         problems.append(
-            f"'trading_mode' must be 'spot' (margin/futures/leverage are "
-            f"prohibited in v1); got {trading_mode!r}"
+            f"'trading_mode' must be explicitly 'spot' (margin/futures/"
+            f"leverage are prohibited in v1); got {trading_mode!r}"
         )
     margin_mode = config.get("margin_mode")
     if margin_mode:
@@ -123,45 +125,54 @@ def check_config(config: dict) -> list[str]:
             f"'margin_mode' must not be set for spot-only trading; got {margin_mode!r}"
         )
 
-    # Position sizing caps.
+    # Position sizing caps — both keys are REQUIRED (fail-closed): the caps
+    # cannot be enforced on a config that makes them vanish.
     max_open_trades = config.get("max_open_trades")
     max_open_ok = False
-    if max_open_trades is not None:
-        if isinstance(max_open_trades, bool) or not isinstance(max_open_trades, int) \
-                or max_open_trades < 1:
-            problems.append("'max_open_trades' must be a positive integer")
-        elif max_open_trades > MAX_OPEN_TRADES:
-            problems.append(
-                f"'max_open_trades' may not exceed {MAX_OPEN_TRADES} "
-                f"(hardcoded limit); got {max_open_trades}"
-            )
-        else:
-            max_open_ok = True
+    if max_open_trades is None:
+        problems.append(
+            "'max_open_trades' is required — the hardcoded cap cannot be "
+            "enforced on a config that omits it"
+        )
+    elif isinstance(max_open_trades, bool) or not isinstance(max_open_trades, int) \
+            or max_open_trades < 1:
+        problems.append("'max_open_trades' must be a positive integer")
+    elif max_open_trades > MAX_OPEN_TRADES:
+        problems.append(
+            f"'max_open_trades' may not exceed {MAX_OPEN_TRADES} "
+            f"(hardcoded limit); got {max_open_trades}"
+        )
+    else:
+        max_open_ok = True
 
     stake = config.get("stake_amount")
     stake_ok = False
-    if stake is not None:
-        if isinstance(stake, str) and stake == "unlimited":
+    if stake is None:
+        problems.append(
+            "'stake_amount' is required — position sizing is capped by "
+            "hardcoded limits and cannot be left to defaults"
+        )
+    elif isinstance(stake, str) and stake == "unlimited":
+        problems.append(
+            "'stake_amount': 'unlimited' is refused — position sizing is "
+            "capped by hardcoded limits"
+        )
+    else:
+        stake_num = _num(stake)
+        if stake_num is None:
+            problems.append(f"'stake_amount' must be a number; got {stake!r}")
+        elif stake_num > MAX_STAKE_PER_TRADE:
             problems.append(
-                "'stake_amount': 'unlimited' is refused — position sizing is "
-                "capped by hardcoded limits"
+                f"'stake_amount' may not exceed {MAX_STAKE_PER_TRADE} "
+                f"(hardcoded limit); got {stake_num}"
+            )
+        elif stake_num < MIN_STAKE_PER_TRADE:
+            problems.append(
+                f"'stake_amount' below {MIN_STAKE_PER_TRADE} cannot satisfy "
+                f"the exchange minimum notional (~$5 on Binance spot); got {stake_num}"
             )
         else:
-            stake_num = _num(stake)
-            if stake_num is None:
-                problems.append(f"'stake_amount' must be a number; got {stake!r}")
-            elif stake_num > MAX_STAKE_PER_TRADE:
-                problems.append(
-                    f"'stake_amount' may not exceed {MAX_STAKE_PER_TRADE} "
-                    f"(hardcoded limit); got {stake_num}"
-                )
-            elif stake_num < MIN_STAKE_PER_TRADE:
-                problems.append(
-                    f"'stake_amount' below {MIN_STAKE_PER_TRADE} cannot satisfy "
-                    f"the exchange minimum notional (~$5 on Binance spot); got {stake_num}"
-                )
-            else:
-                stake_ok = True
+            stake_ok = True
 
     ratio = config.get("tradable_balance_ratio")
     if ratio is not None and (_num(ratio) is None or not (0 < _num(ratio) <= MAX_TRADABLE_BALANCE_RATIO)):
@@ -370,7 +381,14 @@ def cmd_check_account(args: argparse.Namespace) -> int:
 
     columns = ("is_open", "stake_amount", "close_profit_abs", "close_date")
     trades = [dict(zip(columns, row)) for row in rows]
-    report = evaluate_account(trades, args.wallet, datetime.now(timezone.utc))
+    try:
+        report = evaluate_account(trades, args.wallet, datetime.now(timezone.utc))
+    except ValueError as e:
+        # A bad --wallet is a usage error (exit 2), NOT a breach (exit 1) —
+        # the Phase 6/7 watchdog consumers must never mistake a crash for
+        # an account breach.
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
 
     print(f"open trades      : {report['open_trades']} "
           f"(exposure {report['open_exposure']:.2f} / max {report['max_open_exposure']:.2f})")

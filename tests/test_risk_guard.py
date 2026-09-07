@@ -31,6 +31,7 @@ CONFIG_PATH = REPO_ROOT / "user_data" / "config-dryrun.json"
 RISK_GUARD = REPO_ROOT / "scripts" / "risk_guard.py"
 
 # The risk block every real config must carry (mirrors config-dryrun.json).
+# All three keys are REQUIRED: check_config fails closed on omission.
 # NOTE: deliberately no freqtrade Protections here — 2026.8 refuses
 # config-level protections, and the strategy-class alternative would put
 # risk enforcement inside strategy logic. Runtime drawdown/daily-loss
@@ -145,6 +146,33 @@ class TestCheckConfig:
             make_config(dry_run_wallet=float("nan"))
         )
         assert any("dry_run_wallet" in p for p in problems)
+
+    # --- fail-closed on omission: caps that can be made to vanish are not caps
+
+    def test_missing_max_open_trades_refused(self):
+        config = make_config()
+        del config["max_open_trades"]
+        problems = risk_guard.check_config(config)
+        assert any("max_open_trades" in p for p in problems)
+
+    def test_missing_stake_amount_refused(self):
+        config = make_config()
+        del config["stake_amount"]
+        problems = risk_guard.check_config(config)
+        assert any("stake_amount" in p for p in problems)
+
+    def test_missing_trading_mode_refused(self):
+        config = make_config()
+        del config["trading_mode"]
+        problems = risk_guard.check_config(config)
+        assert any("trading_mode" in p for p in problems)
+
+    def test_config_with_no_risk_keys_at_all_refused(self):
+        config = make_config()
+        for key in ("trading_mode", "max_open_trades", "stake_amount"):
+            del config[key]
+        problems = risk_guard.check_config(config)
+        assert len(problems) >= 3
 
 
 # --------------------------------------------------------------------------
@@ -297,6 +325,19 @@ class TestEvaluateAccount:
         report = risk_guard.evaluate_account([naive], wallet_start=20.0, now=NOW)
         assert any("daily loss" in b for b in report["breaches"])
 
+    def test_tz_aware_dates_are_converted_to_utc(self):
+        # 14:00+02:00 == 12:00 UTC — "today" relative to NOW; treating the
+        # wall clock literally would put this trade in the wrong day window.
+        aware = {
+            "is_open": 0,
+            "stake_amount": 8.0,
+            "close_profit_abs": -1.5,
+            "close_date": "2026-09-07T14:00:00+02:00",
+        }
+        report = risk_guard.evaluate_account([aware], wallet_start=20.0, now=NOW)
+        assert report["realized_today"] == pytest.approx(-1.5)
+        assert any("daily loss" in b for b in report["breaches"])
+
     def test_unparsable_rows_are_skipped_not_crashes(self):
         report = risk_guard.evaluate_account(
             [{"is_open": 0, "stake_amount": 8.0, "close_profit_abs": None,
@@ -385,6 +426,17 @@ class TestCli:
         before = path.read_bytes()
         run_risk_guard("check-account", "--db", str(path), "--wallet", "20")
         assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("wallet", ["0", "-5", "nan", "inf"])
+    def test_check_account_bad_wallet_is_error_not_breach(self, trade_db, wallet):
+        # A crash must exit 2 (usage error), never 1 — the watchdog/kill-switch
+        # consumers read exit 1 as "account breached the risk limits".
+        path, _ = trade_db
+        self._insert(path, [(0, 8.0, -1.0, "2026-09-07 09:00:00.000000")])
+        proc = run_risk_guard("check-account", "--db", str(path), "--wallet", wallet)
+        assert proc.returncode == 2, wallet
+        assert "ERROR" in proc.stderr
+        assert "Traceback" not in proc.stderr
 
 
 # --------------------------------------------------------------------------

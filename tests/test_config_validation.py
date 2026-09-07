@@ -11,11 +11,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate_config.py"
 
 # The risk block the Phase 4 gate demands of every real config (mirrors
-# user_data/config-dryrun.json). Without it, configs are refused — so every
-# fixture below carries it and tests only what it means to test.
+# user_data/config-dryrun.json). All three keys are REQUIRED — a config that
+# omits any of them is refused (fail-closed), and values outside the caps
+# are refused — so every fixture below carries it and tests only what it
+# means to test.
 # NOTE: deliberately no freqtrade Protections — 2026.8 refuses config-level
 # protections and the strategy-class alternative would put risk enforcement
 # inside strategy logic; runtime drawdown/daily-loss enforcement is
@@ -59,6 +65,7 @@ def run_validator(tmp_path: Path, config: dict | None = None, env_extra: dict | 
         path.write_text(json.dumps(config), encoding="utf-8")
     env = os.environ.copy()
     env.pop("LIVE_TRADING_CONFIRMED", None)  # isolate from operator shell
+    env = {k: v for k, v in env.items() if not k.startswith("FREQTRADE__")}
     env.update(env_extra or {})
     return subprocess.run(
         [sys.executable, str(SCRIPT), str(path)],
@@ -239,3 +246,44 @@ def test_nan_wallet_is_refused(tmp_path):
     proc = run_validator(tmp_path, raw=raw)
     assert proc.returncode == 1
     assert "dry_run_wallet" in proc.stderr
+
+
+def test_omitted_risk_keys_are_refused(tmp_path):
+    # Fail-closed: caps that can be made to vanish by deleting a key are
+    # not caps. Each risk key is REQUIRED.
+    for key in ("trading_mode", "max_open_trades", "stake_amount"):
+        config = {k: v for k, v in DRYRUN_CONFIG.items() if k != key}
+        proc = run_validator(tmp_path, config, filename=f"missing_{key}.json")
+        assert proc.returncode == 1, f"omitting {key} must be refused"
+        assert key in proc.stderr
+
+
+# --- FREQTRADE__* env overrides must not bypass the file-based gate ----------
+
+
+@pytest.mark.parametrize("name", [
+    "FREQTRADE__DRY_RUN",            # the gate itself (was documented-only in Phase 2)
+    "FREQTRADE__TRADING_MODE",
+    "FREQTRADE__MARGIN_MODE",
+    "FREQTRADE__MAX_OPEN_TRADES",
+    "FREQTRADE__STAKE_AMOUNT",
+    "FREQTRADE__TRADABLE_BALANCE_RATIO",
+    "FREQTRADE__DRY_RUN_WALLET",
+])
+def test_freqtrade_env_override_of_protected_key_is_refused(tmp_path, name):
+    # The validator runs inside the container with .env already loaded —
+    # this is exactly the bypass the compose start path would otherwise offer.
+    proc = run_validator(tmp_path, DRYRUN_CONFIG, {name: "50"},
+                         filename=f"{name.lower()}.json")
+    assert proc.returncode == 1, name
+    assert name in proc.stderr
+
+
+def test_freqtrade_env_override_of_other_keys_still_passes(tmp_path):
+    # Secrets injection (exchange keys, api_server secrets, telegram) stays a
+    # legitimate FREQTRADE__* use — only gate/risk keys are protected.
+    proc = run_validator(
+        tmp_path, DRYRUN_CONFIG,
+        {"FREQTRADE__EXCHANGE__KEY": "k", "FREQTRADE__API_SERVER__WS_TOKEN": "t"},
+    )
+    assert proc.returncode == 0, proc.stderr
