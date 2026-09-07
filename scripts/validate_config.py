@@ -14,6 +14,9 @@ docs/GOLIVE_CHECKLIST.md must also be completed (Phase 8/9).
 
 Checks performed per config file:
   * dry_run is an explicit boolean; false requires the exact confirmation env var
+  * risk limits (Phase 4, scripts/risk_guard.py): spot-only trading, position
+    sizing caps (max_open_trades, stake bounds, wallet fit), and mandatory
+    runtime drawdown protection — all hardcoded, none config-overridable
   * structural sanity: exchange.name, non-empty pair_whitelist, stake_currency,
     positive dry_run_wallet in dry-run mode
   * fee is a RATIO in [0, 0.02] — freqtrade's config `fee` is a ratio
@@ -24,8 +27,8 @@ Checks performed per config file:
 
 Exit codes:
     0  all configs passed
-    1  safety gate refused (dry_run: false without explicit confirmation,
-       or structural problem in a config)
+    1  refused (dry_run: false without explicit confirmation, risk-limit
+       violation, or structural problem in a config)
     2  usage / missing file / unreadable file / JSON parse error
 """
 
@@ -36,6 +39,12 @@ import json
 import math
 import os
 import sys
+
+# risk_guard.py lives beside this script; running as `python3 .../validate_config.py`
+# puts the script's directory on sys.path, so the import works on the compose
+# start path and from any working directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import risk_guard  # noqa: E402
 
 # --- Safety-gate constants (do not weaken) -----------------------------------
 # The confirmation must match this value EXACTLY (case-sensitive) — anything
@@ -166,7 +175,11 @@ def validate(path: str, confirm_env: str | None) -> tuple[bool, list[str], dict]
     content the gate never checked).
     """
     config = load_config(path)
-    problems = check_structure(config) + check_dry_run_gate(config, confirm_env)
+    problems = (
+        check_structure(config)
+        + risk_guard.check_config(config)
+        + check_dry_run_gate(config, confirm_env)
+    )
     return not problems, problems, config
 
 

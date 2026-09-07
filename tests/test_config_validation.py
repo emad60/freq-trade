@@ -13,6 +13,19 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate_config.py"
 
+# The risk block the Phase 4 gate demands of every real config (mirrors
+# user_data/config-dryrun.json). Without it, configs are refused — so every
+# fixture below carries it and tests only what it means to test.
+# NOTE: deliberately no freqtrade Protections — 2026.8 refuses config-level
+# protections and the strategy-class alternative would put risk enforcement
+# inside strategy logic; runtime drawdown/daily-loss enforcement is
+# risk_guard.evaluate_account / check-account.
+RISK_LIMITS = {
+    "trading_mode": "spot",
+    "max_open_trades": 2,
+    "stake_amount": 8.0,
+}
+
 DRYRUN_CONFIG = {
     "dry_run": True,
     "dry_run_wallet": 20.0,
@@ -21,6 +34,7 @@ DRYRUN_CONFIG = {
         "name": "binance",
         "pair_whitelist": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     },
+    **RISK_LIMITS,
 }
 
 LIVE_CONFIG = {
@@ -30,6 +44,7 @@ LIVE_CONFIG = {
         "name": "binance",
         "pair_whitelist": ["BTC/USDT"],
     },
+    **RISK_LIMITS,
 }
 
 
@@ -184,3 +199,43 @@ def test_unreadable_file_exits_2(tmp_path):
     assert proc.returncode == 2
     assert "ERROR" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+# --- Phase 4: hardcoded risk limits ride the same start path ------------------
+
+
+def test_futures_trading_mode_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "trading_mode": "futures"})
+    assert proc.returncode == 1
+    assert "trading_mode" in proc.stderr
+
+
+def test_margin_mode_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "margin_mode": "cross"})
+    assert proc.returncode == 1
+    assert "margin_mode" in proc.stderr
+
+
+def test_too_many_open_trades_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "max_open_trades": 3})
+    assert proc.returncode == 1
+    assert "max_open_trades" in proc.stderr
+
+
+def test_oversized_stake_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "stake_amount": 10.0})
+    assert proc.returncode == 1
+    assert "stake_amount" in proc.stderr
+
+
+def test_sizing_beyond_wallet_is_refused(tmp_path):
+    proc = run_validator(tmp_path, {**DRYRUN_CONFIG, "dry_run_wallet": 10.0})
+    assert proc.returncode == 1
+    assert "sizing exceeds the wallet" in proc.stderr
+
+
+def test_nan_wallet_is_refused(tmp_path):
+    raw = json.dumps(DRYRUN_CONFIG).replace("20.0", "NaN")
+    proc = run_validator(tmp_path, raw=raw)
+    assert proc.returncode == 1
+    assert "dry_run_wallet" in proc.stderr

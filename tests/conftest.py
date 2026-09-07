@@ -14,8 +14,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STRATEGIES_DIR = REPO_ROOT / "user_data" / "strategies"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
 
-for _path in (str(REPO_ROOT), str(STRATEGIES_DIR)):
+for _path in (str(REPO_ROOT), str(STRATEGIES_DIR), str(SCRIPTS_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
