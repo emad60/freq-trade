@@ -122,6 +122,7 @@ immediately (infra failures don't map to the breach exit code).
 | Symptom | Cause / fix |
 |---|---|
 | `docker compose up` exits "successfully" but nothing trades | freqtrade exits 0 even on config errors — read the gate output above it; that is why the gate runs first |
+| Fresh clone crash-loops with `ValueError: Unable to configure handler 'file'` (or later `attempt to write a readonly database`) | the image runs as `ftuser` uid 1000, but your user may not be uid 1000 (e.g. 1001 on a VPS) — the container can read `user_data/` but not write logs/DB. Fix: `chown -R 1000:1000 user_data`; without host sudo, run the chown as root inside docker: `docker run --rm --user 0 -v "$(pwd)/user_data:/x" --entrypoint sh freqtradeorg/freqtrade:stable -c "chown -R 1000:1000 /x"`. Check your uid with `id -u` (the local dev machine happened to be 1000, which is why this only bites on other hosts) |
 | Config change not taking effect | mounted files are not re-read — `docker compose up -d --force-recreate freqtrade watchdog` (README + this doc) |
 | `Unauthorized` calling the REST API | basic auth with `FREQTRADE__API_SERVER__USERNAME:PASSWORD`; in zsh quote the `-u user:pass` argument (no word-splitting of unquoted vars) |
 | Backtest results don't change after re-running | stale `user_data/backtest_results/.last_result.json` pointer, or data format — use `--data-format-ohlcv json`; check the mtime of the zip you're reading |
