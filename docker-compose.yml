@@ -27,7 +27,11 @@ services:
     env_file:
       - .env
     ports:
-      - "127.0.0.1:8080:8080" # Freqtrade REST API / FreqUI — localhost only
+      # Host-side port is machine-specific (another service may own 8080) —
+      # override via BOT_API_PORT in .env; the container-internal 8080 and the
+      # compose-network URL (http://freqtrade:8080) are unaffected. Binding
+      # stays 127.0.0.1 in every case.
+      - "127.0.0.1:${BOT_API_PORT:-8080}:8080" # Freqtrade REST API / FreqUI — localhost only
     volumes:
       - ./user_data:/freqtrade/user_data
       - ./scripts:/freqtrade/scripts:ro

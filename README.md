@@ -100,7 +100,9 @@ Two containers, one job each:
 - **`freqtrade`** — the bot. Every start re-runs `validate_config.py`
   (safety gate) before `freqtrade trade` via the sh -c entrypoint; DB at
   `user_data/tradesv3.dryrun.sqlite`; REST API/FreqUI published to
-  **127.0.0.1 only**.
+  **127.0.0.1 only** — host port defaults to 8080, override with
+  `BOT_API_PORT` in `.env` when that collides with another service
+  (container-internal port and the compose network URL stay 8080).
 - **`watchdog`** — runtime risk enforcement. Every 5 min it re-reads the
   trade DB **read-only**, re-evaluates the *same hardcoded caps* via
   `risk_guard.evaluate_account` (daily loss ≤ $1, drawdown ≤ 15%, exposure
