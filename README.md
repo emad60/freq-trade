@@ -8,7 +8,7 @@ Compose. Spot trading only — no margin, no futures, no leverage.
 
 - **Dry-run by default.** The bot simulates trades against live market data.
   Switching to live trading is a deliberate, multi-step *manual* process
-  (see `docs/GOLIVE_CHECKLIST.md` once it exists) — never a casually flipped flag.
+  (`docs/GOLIVE_CHECKLIST.md`) — never a casually flipped flag.
 - **Risk limits are enforced in code, outside the strategy.** Hard caps
   (per-trade stop-loss, max portfolio drawdown, daily loss limit, position
   sizing) live in `scripts/risk_guard.py` and cannot be overridden by strategy
@@ -19,7 +19,7 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 7 — Telegram monitoring live; dry-run running StarterStrategyV2
+## Status: Phase 8 — docs complete; dry-run running StarterStrategyV2
 
 The dry-run clock started **2026-09-07** (V1) and the bot was switched to
 **StarterStrategyV2** on **2026-09-08** (Phase 5b outcome) — the switch
@@ -50,13 +50,15 @@ config `fee` is a **ratio**, not a percent).
 | 5b | Strategy iteration from backtest data (`StarterStrategyV2`) | ✅ done 2026-09-08 |
 | 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ running V2 since 2026-09-08 (clock ends ~09-22 at the earliest) |
 | 7 | Telegram monitoring & kill-switch | ✅ done 2026-09-08 — RPC + watchdog notifications live |
-| 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST) | ⬜ |
+| 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST, SETUP) | ✅ done 2026-09-08 |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |
 
 ## Hardcoded risk limits (Phase 4)
 
 `scripts/risk_guard.py` is the risk policy as code — deliberately **not**
-configurable (changing a limit is a reviewed commit, never a runtime tweak):
+configurable (changing a limit is a reviewed commit, never a runtime tweak).
+Full rationale, enforcement surfaces, and change process:
+`docs/RISK_POLICY.md`.
 
 | Limit | Value | Enforced |
 |---|---|---|
@@ -103,11 +105,12 @@ Two containers, one job each:
   trade DB **read-only**, re-evaluates the *same hardcoded caps* via
   `risk_guard.evaluate_account` (daily loss ≤ $1, drawdown ≤ 15%, exposure
   ≤ 2 × 8 USDT), and on breach POSTs `/api/v1/stop` (basic auth,
-  credentials from `.env`). `/stop` halts all trading but leaves the
-  container up so breaches stay visible in the logs; the operator reviews
-  and restarts manually. If the DB is missing/unreadable it logs loudly
-  and retries — a broken audit is never silently treated as "within
-  limits", and it never calls `/stop` on an error (only on a real breach).
+  credentials from `.env`) — entries stop, open positions keep being
+  managed — and leaves the container up so breaches stay visible in the
+  logs; the operator reviews and restarts manually. If the DB is
+  missing/unreadable it logs loudly and retries — a broken audit is never
+  silently treated as "within limits", and it never calls `/stop` on an
+  error (only on a real breach).
 
 Stopping the bot deliberately does NOT close positions (freqtrade semantics);
 positions keep being managed while entries stop. Full exit is
@@ -250,15 +253,20 @@ scripts/              validate_config.py (safety gate) + risk_guard.py
                       backtest_ranges.py / run_backtest.sh (Phase 5 harness);
                       watchdog.py + check_account.sh (Phase 6 runtime audit,
                       Phase 7 Telegram escalation)
-docs/                 BACKTEST_RESULTS.md (Phase 5, honest per-regime
-                      results); SETUP.md, RISK_POLICY.md, GOLIVE_CHECKLIST.md
-                      as later phases land
+docs/                 BACKTEST_RESULTS.md (honest per-regime results),
+                      RISK_POLICY.md (limits + change policy),
+                      GOLIVE_CHECKLIST.md (manual go-live gate),
+                      SETUP.md (install/operations walkthrough)
 ```
 
 ## Documentation
 
-- `docs/SETUP.md` — detailed setup walkthrough (Phase 8)
-- `docs/RISK_POLICY.md` — every hardcoded limit, rationale, and change policy (Phase 8)
-- `docs/GOLIVE_CHECKLIST.md` — the manual gate before live trading ever starts (Phase 8/9)
+- `docs/SETUP.md` — full setup walkthrough: install, Telegram, tests, the
+  `--force-recreate` config-change gotcha, logs/rotation, troubleshooting
+- `docs/RISK_POLICY.md` — every hardcoded limit, rationale, the three
+  enforcement surfaces, and the change policy (code + tests + docs move together)
+- `docs/GOLIVE_CHECKLIST.md` — the manual gate before live trading: dry-run
+  time served, positive-after-fee expectancy or NO, key hygiene, deliberate
+  live config, first-48h protocol, sign-off table
 - `docs/BACKTEST_RESULTS.md` — honest per-regime backtest results (Phase 5):
   regime windows, fill assumptions, results, and the no-edge verdict

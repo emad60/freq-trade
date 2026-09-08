@@ -40,9 +40,10 @@ come from FREQTRADE__TELEGRAM__TOKEN / CHAT_ID (.env). With Telegram not
 enabled the notify path is silent and inert. The token is never logged.
 Self-test the delivery path with: python3 scripts/watchdog.py --notify-test
 
-A breach POSTs /api/v1/stop (bot stops entering AND managing trades) and
-keeps running so continued breaches stay visible in `docker compose logs
-watchdog`. Stopping is idempotent; the operator decides whether/when to
+A breach POSTs /api/v1/stop — freqtrade /stop semantics: entries stop,
+open positions KEEP being managed/exited — and the watchdog keeps running
+so continued breaches stay visible in `docker compose logs watchdog`.
+Stopping is idempotent; the operator decides whether/when to
 `docker compose restart freqtrade` after reviewing.
 """
 

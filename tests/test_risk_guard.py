@@ -437,9 +437,13 @@ class TestCli:
         assert "OK (account within risk limits)" in proc.stdout
 
     def test_check_account_reports_daily_breach(self, trade_db):
+        # The check-account CLI evaluates against the real wall clock (no
+        # --now flag), so the fixture dates must be relative to today —
+        # hardcoded dates silently stop breaching at UTC midnight.
         path, _ = trade_db
-        self._insert(path, [(0, 8.0, -0.7, "2026-09-07 09:00:00.000000"),
-                            (0, 8.0, -0.5, "2026-09-07 11:00:00.000000")])
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._insert(path, [(0, 8.0, -0.7, f"{today} 09:00:00.000000"),
+                            (0, 8.0, -0.5, f"{today} 11:00:00.000000")])
         proc = run_risk_guard("check-account", "--db", str(path), "--wallet", "20")
         assert proc.returncode == 1
         assert "BREACH" in proc.stderr
