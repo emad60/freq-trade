@@ -19,13 +19,15 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 8 done + Phase 5c iteration; dry-run running StarterStrategyV2 (server)
+## Status: Phase 8 done + Phase 5c iteration; dry-run running StarterStrategyV3BtcVolume (server)
 
-The dry-run clock started **2026-09-07** (V1) and the bot was switched to
-**StarterStrategyV2** on **2026-09-08** (Phase 5b outcome) — the switch
-restarted the 2–4 week gate, which now ends ~2026-09-22 at the earliest,
-and only then via the manual checklist. Since 2026-09-09 the stack runs on
-an always-on server (same DB, same clock — see `docs/SETUP.md`).
+The dry-run clock started **2026-09-07** (V1), was switched to
+**StarterStrategyV2** on **2026-09-08** (Phase 5b outcome), and to
+**StarterStrategyV3BtcVolume** on **2026-09-10** (Phase 5c outcome) — each
+switch restarted the 2–4 week gate, which now ends **~2026-09-24** at the
+earliest, and only then via the manual checklist. Since 2026-09-09 the
+stack runs on an always-on server (same DB, same clock — see
+`docs/SETUP.md`).
 
 Phase 5c (2026-09-10) tested four V3 candidate arms against the same
 harness; the combined BTC-regime + volume-gate arm improved every metric
@@ -52,7 +54,7 @@ config `fee` is a **ratio**, not a percent).
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ✅ done |
 | 5b | Strategy iteration from backtest data (`StarterStrategyV2`) | ✅ done 2026-09-08 |
 | 5c | V3 candidate arms (BTC-regime gate, volume gate, no-fade ablation) | ✅ done 2026-09-10 — combined arm least-bad, still no edge |
-| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ running V2 since 2026-09-08 (clock ends ~09-22 at the earliest) |
+| 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ running V3BtcVolume since 2026-09-10 (clock ends ~09-24 at the earliest) |
 | 7 | Telegram monitoring & kill-switch | ✅ done 2026-09-08 — RPC + watchdog notifications live |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST, SETUP) | ✅ done 2026-09-08 |
 | 9 | Going live — manual, gated | ⬜ (requires the full dry-run period first) |

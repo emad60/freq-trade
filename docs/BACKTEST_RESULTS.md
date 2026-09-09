@@ -254,6 +254,13 @@ sideways_v3combined,bull_v3combined}.zip`.
    different entry family (e.g. momentum/breakout instead of mean-reversion)
    or timeframe, which is a Phase 5d-scale decision, not another arm.
 
+**Operator decision (2026-09-10): the dry-run was switched to the combined
+arm** (`StarterStrategyV3BtcVolume`) — dry-running the best available arm
+keeps the paper-trading evidence relevant and live-validates the new
+informative-pairs code path. The clock restarted with the switch (now ends
+~2026-09-24 at the earliest). The Gate 1 verdict at review time still
+depends on expectancy, which remains negative on current evidence.
+
 ## Reproduce
 
 ```bash
