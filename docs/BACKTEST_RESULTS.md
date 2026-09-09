@@ -192,11 +192,74 @@ V2 full-sample exit breakdown:
    work), and each such change re-runs this harness with the full sample
    as the overfit guard.
 
+## Phase 5c — V3 candidate arms (2026-09-10)
+
+Three hypothesis-driven arms were derived from the Phase 5b breakdown
+("per-trade expectancy unchanged, R:R collapsed, stop-outs the biggest loss
+bucket"), each implemented as a separate subclass changing exactly ONE
+inherited behavior, each tested on the same harness (same windows, data,
+gated config, fees). No threshold was tuned anywhere — the arms are
+structural filters, not fitted parameters. The Fear&Greed and funding-skew
+ideas were dropped as out-of-scope for spot v1: funding does not exist on
+spot, and F&G needs a non-OHLCV external feed.
+
+| Arm | Change vs V2 | Rationale from 5b data |
+|---|---|---|
+| **V3a** `StarterStrategyV3BtcRegime` | entry additionally requires BTC's EMA(200) rising (informative pair) | ETH/SOL follow BTC's regime; alts bought while BTC's regime still falls are knives |
+| **V3b** `StarterStrategyV3NoFade` | ablation: H3's RSI-60 fade exit removed | 5b blamed H3 for the R:R collapse (its wins averaged +1.73%) |
+| **V3c** `StarterStrategyV3Volume` | entry additionally requires volume > 20-candle SMA | reclaims on thin volume kept selling back into the stop |
+| **combined** `StarterStrategyV3BtcVolume` | V3a + V3c stacked | a priori independent mechanisms; tests whether they compose |
+
+### Full-sample results (2021-06-01 → 2026-09-07, fee 0.1%)
+
+| Arm | Trades | Win% | Avg/trade | Total | Max DD |
+|---|---|---|---|---|---|
+| V2 baseline (from 5b) | 53 | 28.3% | −0.42% | −8.80% | 11.34% |
+| V3a BTC gate | 48 | 29.2% | −0.38% | −7.19% | 9.75% |
+| V3b no-fade ablation | 53 | 22.6% | −0.45% | −9.29% | 11.97% |
+| V3c volume gate | 30 | 30.0% | −0.27% | −3.15% | 5.42% |
+| **V3 combined (a+c)** | 28 | 32.1% | −0.16% | **−1.79%** (−$0.36) | 4.09% |
+| V3 combined, 0.2% fee | 28 | 32.1% | −0.35% | −3.80% | 5.05% |
+
+Combined-arm regime windows (tiny counts — direction only, not statistics):
+bear 5 trades **+1.51%** (V2: 9 trades −1.18%), sideways 2 **+1.45%** (V2: 4,
++0.40%), bull 3 **−0.74%** (V2: 6, −2.30%).
+
+Result zips: `{full_v3a_btcgate,full_v3b_nofade,full_v3c_volume,
+full_v3combined,full_v3combined_fee_stress,bear_v3combined,
+sideways_v3combined,bull_v3combined}.zip`.
+
+### Reading it honestly
+
+1. **Still no edge — the Gate 1 verdict is unchanged.** −1.79% over 5.3
+   years on 28 trades is statistically indistinguishable from zero, not a
+   positive expectancy. Nothing here justifies live money.
+2. **The ablation refuted the 5b R:R diagnosis.** Removing H3 made things
+   *worse* (−9.29% vs −8.80%; win rate 28.3% → 22.6%): the fade exit was
+   cutting losers before the stop did, not merely shrinking winners. H3 is
+   load-bearing and stays.
+3. **The two entry gates genuinely composed.** Each improved per-trade
+   expectancy independently (−0.42 → −0.38 → −0.27), and stacking them
+   reached −0.16 with a further win-rate lift (32.1%). The improvement is
+   entry quality, not volume reduction alone: 28 trades at −0.16%/trade vs
+   V2's 53 at −0.42%/trade.
+4. **Fee sensitivity is now minor** (~2pp at doubled fees, vs V1's 9.7pp):
+   at ~5 trades/year the strategy is barely exposed to the fee hurdle that
+   dominated the Phase 5 lessons. Drawdown (4.09%) sits far inside the
+   hardcoded −15% runtime kill in all runs.
+5. **The trajectory has asymptoted.** V1 −24.5% → V2 −8.8% → V3 combined
+   −1.8%: five hypothesis-driven iterations have walked the same RSI-30
+   dip-buy skeleton up to breakeven without ever crossing it. The remaining
+   gap to a real edge is bigger than filter-tuning — it would take a
+   different entry family (e.g. momentum/breakout instead of mean-reversion)
+   or timeframe, which is a Phase 5d-scale decision, not another arm.
+
 ## Reproduce
 
 ```bash
 scripts/run_backtest.sh bear            # also: sideways | bull | full
 scripts/run_backtest.sh full --stress-fee   # 0.2% per side
 scripts/run_backtest.sh full --strategy StarterStrategyV2   # Phase 5b V2
+scripts/run_backtest.sh full --strategy StarterStrategyV3BtcVolume   # Phase 5c combined arm
 python3 scripts/backtest_ranges.py list     # regime windows
 ```

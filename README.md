@@ -19,16 +19,19 @@ Compose. Spot trading only — no margin, no futures, no leverage.
   Template: `.env.example`. Only trade-only-scoped API keys are ever permitted.
 - **Every phase ends runnable and testable** — no skeleton-only phases.
 
-## Status: Phase 8 — docs complete; dry-run running StarterStrategyV2
+## Status: Phase 8 done + Phase 5c iteration; dry-run running StarterStrategyV2 (server)
 
 The dry-run clock started **2026-09-07** (V1) and the bot was switched to
 **StarterStrategyV2** on **2026-09-08** (Phase 5b outcome) — the switch
 restarted the 2–4 week gate, which now ends ~2026-09-22 at the earliest,
-and only then via the manual checklist. V2 is the Phase 5b iteration: still
-**no edge** (−8.8% vs V1's −24.5% over the 5.3-year sample, per-trade
-expectancy unchanged) but strictly less-bad in every regime, with ⅓ the
-trades and an 11.3% worst drawdown that stays inside the hardcoded −15%
-runtime kill. See `docs/BACKTEST_RESULTS.md` (Phase 5b section).
+and only then via the manual checklist. Since 2026-09-09 the stack runs on
+an always-on server (same DB, same clock — see `docs/SETUP.md`).
+
+Phase 5c (2026-09-10) tested four V3 candidate arms against the same
+harness; the combined BTC-regime + volume-gate arm improved every metric
+(28 trades, −0.16%/trade, −1.79% total, 4.09% DD — vs V2's 53/−0.42%/−8.80%/11.34%)
+but is **still not a positive edge**, so the gate verdict is unchanged and
+the dry-run continues. See `docs/BACKTEST_RESULTS.md` (Phase 5c section).
 
 Telegram (Phase 7) is **live**: the bot's native RPC listens for operator
 commands and the watchdog pushes breach/error/unreachable notifications to
@@ -48,6 +51,7 @@ config `fee` is a **ratio**, not a percent).
 | 4 | Hardcoded risk management layer (`risk_guard.py`) | ✅ done |
 | 5 | Backtesting with realistic fees + slippage, 3 market regimes | ✅ done |
 | 5b | Strategy iteration from backtest data (`StarterStrategyV2`) | ✅ done 2026-09-08 |
+| 5c | V3 candidate arms (BTC-regime gate, volume gate, no-fade ablation) | ✅ done 2026-09-10 — combined arm least-bad, still no edge |
 | 6 | Dry-run (paper trading) setup — min 2–4 weeks | ✅ running V2 since 2026-09-08 (clock ends ~09-22 at the earliest) |
 | 7 | Telegram monitoring & kill-switch | ✅ done 2026-09-08 — RPC + watchdog notifications live |
 | 8 | Logging, testing & docs (RISK_POLICY, GOLIVE_CHECKLIST, SETUP) | ✅ done 2026-09-08 |
